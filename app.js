@@ -695,6 +695,10 @@
      ------------------------------------------------------------------- */
   function handleFile(file) {
     if (!file) return;
+    if (typeof XLSX === "undefined") {
+      setStatus("The Excel-reading library (SheetJS) failed to load from the CDN, so files can't be read. Check your internet connection or ad-blocker and reload the page.", "error");
+      return;
+    }
     document.getElementById("fileName").textContent = file.name;
     setStatus("Reading workbook...", null);
     const reader = new FileReader();
@@ -703,10 +707,10 @@
         loadWorkbookFromArrayBuffer(new Uint8Array(e.target.result));
       } catch (err) {
         console.error(err);
-        setStatus("Could not read this file. Please confirm it is a valid .xlsx / .xls export.", "error");
+        setStatus("Could not read this file: " + (err && err.message ? err.message : "unknown error") + ". Please confirm it is a valid, non-password-protected .xlsx / .xls export.", "error");
       }
     };
-    reader.onerror = () => setStatus("Error reading file.", "error");
+    reader.onerror = () => setStatus("Error reading file from disk. Please try again.", "error");
     reader.readAsArrayBuffer(file);
   }
 
@@ -927,6 +931,11 @@
   document.addEventListener("DOMContentLoaded", async () => {
     initUpload();
     initAdmin();
+    if (typeof XLSX === "undefined" || typeof Chart === "undefined") {
+      const missing = [typeof XLSX === "undefined" ? "SheetJS (xlsx.js)" : null, typeof Chart === "undefined" ? "Chart.js" : null].filter(Boolean).join(" and ");
+      setStatus(`${missing} failed to load from the CDN. Charts/parsing won't work until this is resolved - check your network connection or ad-blocker, then reload.`, "error");
+      return;
+    }
     await tryAutoLoadPublishedData();
   });
 })();

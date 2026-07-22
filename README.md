@@ -4,6 +4,11 @@ A static, client-side dashboard for tracking store-level product quality complai
 It reads an Excel workbook exported from Microsoft Forms directly in the browser —
 there is no backend, no build step, and no data ever leaves the device.
 
+The dashboard ships with a pre-published `data/quality-data.json` seed file, so it is
+**live from the very first deploy** — anyone who opens the page sees current data
+immediately, with no upload step. An Admin panel lets you push future updates to that
+same file straight from the browser (see "Publishing live data" below).
+
 ## What it does
 
 - Upload (or drag-and-drop) the latest `.xlsx` quality-complaint export
@@ -13,20 +18,28 @@ there is no backend, no build step, and no data ever leaves the device.
   matching (e.g. anything with "store" + "code" is treated as the store code field),
   not hardcoded exact names — so the dashboard keeps working even if a future
   month's form re-orders or slightly re-words its columns
-- KPI cards, five charts, and filters are generated from whatever fields are
-  actually present in the file:
+- KPI cards, six charts, a sortable/searchable data table, and filters are
+  generated from whatever fields are actually present in the file:
   - Status breakdown (doughnut)
   - ROM-wise issues reported (bar, descending) — only appears once the ROM & RM
     mapping is loaded (see below)
   - Trend over time (line, monthly)
   - Top 10 vendors by defects reported (horizontal bar)
   - Top 10 article descriptions by defects reported (horizontal bar)
-- Date, store, ROM, status and vendor filters appear automatically when those
-  fields are detected
+  - Top 10 sections by defects reported (horizontal bar) — only appears once the
+    Article Section & MAP mapping is loaded (see below)
+- KPI cards include Total Complaints, Open/WIP, Closed, Total Defect Quantity,
+  Stores Affected and — once the Article Section & MAP mapping is loaded —
+  **Estimated MAP Value Impact** (defect quantity × MAP value, summed and shown
+  as Indian-locale currency)
+- Date, store, ROM, status, vendor and section filters appear automatically when
+  those fields are detected
+- A row-level data table below the charts is sortable by column, searchable, and
+  reflects the current filters
 - An **Admin** panel (passcode-gated, session-only) shows the detected column
-  mapping for transparency, lets you upload the optional ROM & RM mapping file,
-  export the currently filtered rows as CSV, and publish the full dataset live
-  to GitHub
+  mapping for transparency, lets you upload the optional ROM & RM mapping file
+  and the optional Article Section & MAP mapping file, export the currently
+  filtered rows as CSV, and publish the full dataset live to GitHub
 
 Everything runs in-session in the browser tab. Refreshing the page clears all
 loaded data — nothing is written to localStorage, cookies, or any server.
@@ -35,11 +48,24 @@ loaded data — nothing is written to localStorage, cookies, or any server.
 
 ```
 hamleys-quality-dashboard/
-├── index.html   # page structure
-├── style.css    # all styling (Hamleys red/white/dark-grey theme)
-├── app.js       # all logic: parsing, filtering, charts, table, admin panel
-└── README.md    # this file
+├── index.html                  # page structure
+├── style.css                   # all styling (Hamleys red/white/dark-grey theme)
+├── app.js                      # all logic: parsing, filtering, charts, table, admin panel
+├── data/
+│   └── quality-data.json       # pre-published seed data — the dashboard is live
+│                                # from the first deploy; the Admin "Publish" flow
+│                                # overwrites this same file for future updates
+├── scripts/
+│   └── generate-seed-data.js   # optional Node power-user shortcut, see below
+├── package.json                # declares the `xlsx` dependency for the script above
+└── README.md                   # this file
 ```
+
+`data/quality-data.json` is included in this repo as **pre-published seed data**, so
+the dashboard shows current numbers to leadership immediately after the first
+deploy — no admin has to open the app and click Publish before anyone can see it.
+The Admin publish flow (see below) remains how you push future updates; it simply
+overwrites this same file with a new commit.
 
 ## Running it locally
 
@@ -67,7 +93,10 @@ sees the latest data with no upload step — an admin can publish once from
 inside the app:
 
 1. Open the dashboard, upload the latest `.xlsx` export as normal, and select
-   the sheets you want (same as any manual session).
+   the sheets you want (same as any manual session). If you also want the ROM/RM
+   or Article Section/MAP mappings refreshed, upload those too (see the two
+   mapping sections below) before publishing — both are bundled into the same
+   published file.
 2. Click **Admin** (top right) and enter the admin passcode.
 3. Under **Publish live data to GitHub**, fill in:
    - **GitHub token** — a personal access token with write access to this
@@ -119,6 +148,30 @@ export, so it's loaded from a separate small lookup workbook:
 If you re-organize ROMs/RMs later, just re-upload an updated mapping file and
 re-publish — same one-time admin step, no code changes needed.
 
+## Article Section & MAP mapping (optional, enables the Sections chart & MAP KPI)
+
+The "Top 10 sections by defects reported" chart, the Section filter, and the
+"Estimated MAP Value Impact" KPI all need to know which merchandise Section each
+Article Code belongs to, and its MAP (per-unit) value. This isn't in the
+quality-complaint export either, so it's loaded from a separate lookup workbook
+(the same one buying/merchandising already maintains, `.xlsb`, `.xlsx` or `.xls`):
+
+1. In the Admin panel, under **Article Section & MAP mapping (optional)**, upload
+   a workbook with columns for Article Code, Section and MAP — column order
+   doesn't matter, headers are matched by keyword, and `.xlsb` (Excel binary)
+   files are read natively in the browser, no conversion needed.
+2. It joins onto the loaded complaint records by Article Code immediately: each
+   matching record gets a Section, a MAP value, and a derived MAP Impact
+   (defect quantity × MAP value). The Sections chart, Section filter and the
+   "Estimated MAP Value Impact" KPI card all appear once at least one record
+   resolves a Section/MAP value.
+3. If you publish afterward, this mapping is bundled into the published JSON
+   too, so viewers get the Sections breakdown and MAP Value Impact KPI
+   automatically without uploading anything.
+
+If Section names or MAP values change later, just re-upload an updated mapping
+file and re-publish — same one-time admin step, no code changes needed.
+
 ## Admin passcode
 
 The admin panel uses a simple front-of-house passcode set in `app.js`
@@ -135,6 +188,30 @@ If a future form export uses wording the pattern rules don't recognize, open
 `{ key, test }` pair where `test` receives the lower-cased, whitespace-normalized
 header text. Add or adjust a rule's regex to teach the dashboard about the new
 wording; no other code needs to change.
+
+## Regenerating seed data with Node (optional, power-user shortcut)
+
+The primary way to update the live dataset is the in-browser Admin → Publish
+flow described above — no Node.js or npm required for normal use. If you'd
+rather regenerate `data/quality-data.json` from source workbooks on your own
+machine instead (e.g. for a bulk historical reload, or to script it into a
+CI job), an optional helper is included:
+
+```
+npm install
+node scripts/generate-seed-data.js
+```
+
+By default it looks for the three source workbooks (the main quality-complaint
+export, the ROM & RM mapping, and the Article Section & MAP mapping) in a
+`./source-data/` folder next to this script, matching filenames by keyword so
+exact names/dates don't matter. Pass `--dir=/path/to/folder` to point it
+elsewhere. It reuses the exact same parsing/normalization/join functions from
+`app.js` (via `require('../app.js')`) — not a reimplementation — so its output
+is equivalent to what an in-browser Publish click against the same three files
+would produce. This script only writes the local `data/quality-data.json`
+file; you still need to commit and push it (or use the in-browser Publish
+flow instead, which commits directly).
 
 ## Browser support
 

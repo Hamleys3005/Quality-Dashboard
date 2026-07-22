@@ -1,0 +1,12 @@
+{
+  "name": "hamleys-quality-dashboard-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Optional Node helper to (re)generate data/quality-data.json seed data for the Hamleys Quality Dashboard. Not required for normal use -- the primary way to update live data is the in-browser Admin -> Publish flow.",
+  "scripts": {
+    "generate-seed-data": "node scripts/generate-seed-data.js"
+  },
+  "dependencies": {
+    "xlsx": "^0.18.5"
+  }
+}

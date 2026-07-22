@@ -1,1031 +1,1263 @@
-/* =========================================================================
-   Hamleys Quality Dashboard
-   Pure client-side: SheetJS parses the workbook, everything else runs here.
-   No network calls after the CDN scripts load. No localStorage/cookies.
-   ========================================================================= */
+/* ==========================================================================
+   Hamleys Quality Dashboard — app.js
+   ==========================================================================
+   Structure:
+     1. PURE section — parsing / normalization / join / KPI logic.
+        No DOM, window, or document access. Usable from Node (for the
+        scripts/generate-seed-data.js build script) AND the browser, via
+        the module.exports guard at the bottom of this section.
+     2. BROWSER section — wires the pure functions above to the DOM defined
+        in index.html. Runs only when `window` exists.
+   ========================================================================== */
 
-(function () {
-  "use strict";
+/* ---------------------------- 1. PURE SECTION ---------------------------- */
 
-  /* ---------------------------------------------------------------------
-     State (in-memory only, cleared on refresh)
-     ------------------------------------------------------------------- */
-  const state = {
-    workbook: null,
-    sheetNames: [],
-    selectedSheets: [],
-    records: [],          // unified, canonical-field records across sheets
-    fields: {},           // canonical field -> detected (originalHeader, sheet) info, for admin view
-    fieldsPresent: new Set(), // which canonical fields were actually found anywhere
-    romMapping: {},        // Store Code -> { storeName, rom, rm }, from the optional admin upload
-    filters: {},
-    charts: {},
-    isAdmin: false
+var ADMIN_PASSCODE = 'hamleys2026';
+
+/* Normalize a raw header cell into a lower-cased, whitespace-collapsed,
+   punctuation-stripped string for pattern matching. */
+function normalizeHeader(h) {
+  return String(h === null || h === undefined ? '' : h)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+/* Field rules for the monthly complaint-log sheets. Order matters where
+   two rules could both match the same header text (see smNumber vs
+   contactNumber) — the first rule in this array wins for a given column. */
+var FIELD_RULES = [
+  { key: 'dateOfManufacturing', test: function (h) { return /\bdate\b/.test(h) && /\bmanufactur/.test(h); } },
+  { key: 'date', test: function (h) { return /\bdate\b/.test(h) && /\bissue\b/.test(h) && !/\bmanufactur/.test(h); } },
+  { key: 'articleCode', test: function (h) { return /\barticle\b/.test(h) && /\bcode\b/.test(h); } },
+  { key: 'itemDescription', test: function (h) { return /\bitem\b/.test(h) && /\bdescription\b/.test(h); } },
+  { key: 'vendorName', test: function (h) { return /\bvendor\b/.test(h) && /\bname\b/.test(h); } },
+  { key: 'issueDescription', test: function (h) { return /\bdescribe\b/.test(h) && /\bissue\b/.test(h); } },
+  { key: 'batchCode', test: function (h) { return /\bbatch\b/.test(h) && /\bcode\b/.test(h); } },
+  { key: 'storeCode', test: function (h) { return /\bstore\b/.test(h) && /\bcode\b/.test(h); } },
+  { key: 'storeLocation', test: function (h) { return /\bstore\b/.test(h) && /\blocation\b/.test(h); } },
+  { key: 'defectQty', test: function (h) { return /\bdefect\b/.test(h) && /(quant|qty)/.test(h); } },
+  { key: 'category', test: function (h) { return /\bcategory\b/.test(h); } },
+  { key: 'rootCause', test: function (h) { return /\broot\b/.test(h) && /\bcause\b/.test(h); } },
+  { key: 'containmentAction', test: function (h) { return /\bcontainment\b/.test(h) && /\baction\b/.test(h); } },
+  { key: 'closureTarget', test: function (h) { return /\bclosure\b/.test(h) && /(tgt|target)/.test(h); } },
+  { key: 'status', test: function (h) { return /\bstatus\b/.test(h); } },
+  { key: 'vendorRemarks', test: function (h) { return /\bvendor\b/.test(h) && /\bremark/.test(h); } },
+  { key: 'storeRemarks', test: function (h) { return /\bstore\b/.test(h) && /\bremark/.test(h); } },
+  { key: 'smName', test: function (h) { return (/\bsm\b/.test(h) || (/\bstore\b/.test(h) && /\bmanager\b/.test(h))) && /\bname\b/.test(h) && !/mail/.test(h); } },
+  { key: 'smNumber', test: function (h) { return (/\bsm\b/.test(h) || (/\bstore\b/.test(h) && /\bmanager\b/.test(h))) && /(number|contact)/.test(h) && !/mail/.test(h); } },
+  { key: 'smEmail', test: function (h) { return (/\bsm\b/.test(h) || (/\bstore\b/.test(h) && /\bmanager\b/.test(h))) && /mail/.test(h); } },
+  { key: 'clusterLeader', test: function (h) { return /\bcluster\b/.test(h) && /lead/.test(h); } },
+  { key: 'contactNumber', test: function (h) { return /\bcontact\b/.test(h) && /\bnumber\b/.test(h); } },
+  { key: 'complaintStage', test: function (h) { return /\bcomplaint\b/.test(h) && /\bstage\b/.test(h); } }
+];
+
+/* Field rules for the ROM & RM mapping workbook (Store Code, Name, ROM, RM). */
+var ROM_FIELD_RULES = [
+  { key: 'storeCode', test: function (h) { return /\bstore\b/.test(h) && /\bcode\b/.test(h); } },
+  { key: 'rom', test: function (h) { return /\brom\b/.test(h); } },
+  { key: 'rm', test: function (h) { return /\brm\b/.test(h); } },
+  { key: 'storeName', test: function (h) { return /\bname\b/.test(h); } }
+];
+
+/* Field rules for the Article MAP Section workbook (Article Code, Section, MAP). */
+var ARTICLE_FIELD_RULES = [
+  { key: 'articleCode', test: function (h) { return /\barticle\b/.test(h) && /\bcode\b/.test(h); } },
+  { key: 'section', test: function (h) { return /\bsection\b/.test(h); } },
+  { key: 'mapValue', test: function (h) { return /\bmap\b/.test(h); } }
+];
+
+/* Minimum number of complaint FIELD_RULES a sheet's detected header row must
+   match before it is treated as a complaint-log candidate (auto-checked). */
+var COMPLAINT_SHEET_MIN_MATCHES = 4;
+
+/* Build { key: columnIndex } from a single header row (array of cells)
+   using a rule set. Leftmost matching column wins for each key; a column
+   is claimed by at most one key (first rule in `rules` order that matches
+   an unclaimed column). */
+function buildFieldMap(headerRow, rules) {
+  var fieldMap = {};
+  var claimedCols = {};
+  headerRow = headerRow || [];
+  for (var colIdx = 0; colIdx < headerRow.length; colIdx++) {
+    if (claimedCols[colIdx]) continue;
+    var h = normalizeHeader(headerRow[colIdx]);
+    if (!h) continue;
+    for (var i = 0; i < rules.length; i++) {
+      var rule = rules[i];
+      if (fieldMap.hasOwnProperty(rule.key)) continue;
+      if (rule.test(h)) {
+        fieldMap[rule.key] = colIdx;
+        claimedCols[colIdx] = true;
+        break;
+      }
+    }
+  }
+  return fieldMap;
+}
+
+/* Scan up to maxScan rows of a raw (header:1-style array-of-arrays) sheet
+   and return the index of the row that best matches known field rules
+   (most matched columns wins). Handles files like the ROM mapping's
+   blank first row without hardcoding row 0 as the header. */
+function detectHeaderRow(rows, rules, maxScan) {
+  maxScan = maxScan || 10;
+  rows = rows || [];
+  var bestIdx = 0;
+  var bestScore = -1;
+  var limit = Math.min(maxScan, rows.length);
+  for (var i = 0; i < limit; i++) {
+    var row = rows[i] || [];
+    var fieldMap = buildFieldMap(row, rules);
+    var score = Object.keys(fieldMap).length;
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+/* Convenience wrapper: detect the header row, build the field map for it,
+   and report how many fields matched (used for sheet-candidate scoring). */
+function analyzeSheet(rows, rules, maxScan) {
+  var headerRowIdx = detectHeaderRow(rows, rules, maxScan);
+  var headerRow = (rows && rows[headerRowIdx]) || [];
+  var fieldMap = buildFieldMap(headerRow, rules);
+  return {
+    headerRowIdx: headerRowIdx,
+    headerRow: headerRow,
+    fieldMap: fieldMap,
+    matchCount: Object.keys(fieldMap).length
   };
+}
 
-  const ADMIN_PASSCODE = "hamleys2026"; // simple front-of-house gate, not real security
+function isComplaintSheetCandidate(rows, maxScan) {
+  var info = analyzeSheet(rows, FIELD_RULES, maxScan);
+  return info.matchCount >= COMPLAINT_SHEET_MIN_MATCHES;
+}
 
-  // Relative path (within this same GitHub Pages site) that the admin "Publish"
-  // action commits to, and that every visitor's browser tries to auto-load on
-  // page open. Must match the "File path in repo" field in the admin panel.
-  const DATA_JSON_PATH = "data/quality-data.json";
+/* Excel serial date (1900 date system) -> JS Date. */
+function excelSerialToDate(serial) {
+  if (typeof serial !== 'number' || isNaN(serial)) return null;
+  var utcDays = Math.floor(serial - 25569);
+  var utcMs = utcDays * 86400 * 1000;
+  var fractionalDay = serial - Math.floor(serial);
+  var d = new Date(utcMs + Math.round(fractionalDay * 86400 * 1000));
+  return isNaN(d.getTime()) ? null : d;
+}
 
-  /* ---------------------------------------------------------------------
-     Canonical field detection
-     Headers drift month to month in real MS Forms exports (e.g.
-     "SM Name" vs "Store Manager Name"), so we match by keyword pattern
-     against row 1 rather than expecting an exact fixed name.
-     ------------------------------------------------------------------- */
-  const FIELD_RULES = [
-    { key: "dateOfIssue",       test: h => /date/.test(h) && /issue|submit|response|timestamp/.test(h) },
-    { key: "manufacturingDate", test: h => /manufactur/.test(h) },
-    { key: "articleCode",       test: h => /article/.test(h) && /code/.test(h) },
-    { key: "itemDescription",   test: h => /item/.test(h) && /desc/.test(h) },
-    { key: "vendorName",        test: h => /vendor/.test(h) && /name/.test(h) },
-    { key: "issueDescription",  test: h => /(describe|detail).*issue|issue.*detail|quality issue/.test(h) },
-    { key: "complaintStage",    test: h => /complaint/.test(h) && /stage/.test(h) },
-    { key: "batchCode",         test: h => /batch/.test(h) },
-    { key: "storeCode",         test: h => /store/.test(h) && /code/.test(h) },
-    { key: "storeLocation",     test: h => /store/.test(h) && /location/.test(h) },
-    { key: "defectQuantity",    test: h => /defect/.test(h) && /(qty|quantity)/.test(h) },
-    { key: "category",          test: h => /^category$/.test(h) || (/categor/.test(h) && h.split(/\s+/).length <= 2) },
-    { key: "rootCause",         test: h => /root/.test(h) && /cause/.test(h) },
-    { key: "containmentAction", test: h => /containment/.test(h) },
-    { key: "status",            test: h => /^status$/.test(h) },
-    { key: "closureTarget",     test: h => /closure/.test(h) },
-    { key: "vendorRemarks",     test: h => /vendor/.test(h) && /remark/.test(h) },
-    { key: "storeRemarks",      test: h => /store/.test(h) && /remark/.test(h) && !/manager/.test(h) },
-    { key: "clusterLeader",     test: h => /cluster/.test(h) && (/leader/.test(h) || /quality/.test(h)) },
-    { key: "smName",            test: h => (/^sm\b/.test(h) || /store manager/.test(h)) && /name/.test(h) },
-    { key: "smEmail",           test: h => (/^sm\b/.test(h) || /store manager/.test(h) || /manager/.test(h)) && /e[\s-]?mail/.test(h) },
-    { key: "smNumber",          test: h => (/^sm\b/.test(h) || /store manager/.test(h)) && /(number|contact)/.test(h) },
-    // generic "Contact Number" columns get resolved positionally below
+/* Parse a date-ish cell value into an ISO (YYYY-MM-DD) string. Keeps the
+   raw string if unparseable rather than throwing. opts.mmYYYY treats
+   numeric/string values as an MMYYYY-encoded month (used for
+   "Date of Manufacturing(MMYYYY)"). */
+function parseDateValue(value, opts) {
+  opts = opts || {};
+  if (value === null || value === undefined || value === '') return '';
+
+  if (value instanceof Date) {
+    return isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 10);
+  }
+
+  if (opts.mmYYYY) {
+    var s = String(value).trim();
+    s = s.length < 6 ? ('000000' + s).slice(-6) : s;
+    var m = s.match(/^(\d{2})(\d{4})$/);
+    if (m) {
+      var mo = Number(m[1]);
+      var y = Number(m[2]);
+      if (mo >= 1 && mo <= 12 && y > 1900) {
+        var dt = new Date(y, mo - 1, 1);
+        if (!isNaN(dt.getTime())) return dt.toISOString().slice(0, 10);
+      }
+    }
+  }
+
+  if (typeof value === 'number') {
+    var d1 = excelSerialToDate(value);
+    if (d1) return d1.toISOString().slice(0, 10);
+    return String(value);
+  }
+
+  if (typeof value === 'string') {
+    var str = value.trim();
+    if (!str) return '';
+    var m2 = str.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})$/);
+    if (m2) {
+      var dd = Number(m2[1]), mm = Number(m2[2]), yy = m2[3];
+      if (yy.length === 2) yy = (Number(yy) > 50 ? '19' : '20') + yy;
+      var dt2 = new Date(Number(yy), mm - 1, dd);
+      if (!isNaN(dt2.getTime())) return dt2.toISOString().slice(0, 10);
+    }
+    if (/\d{4}/.test(str)) {
+      var parsed = new Date(str);
+      if (!isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+    }
+    return str;
+  }
+
+  return String(value);
+}
+
+/* Parse a numeric-ish cell value; defaults to 0 for blank/unparseable. */
+function toNumber(value) {
+  if (value === null || value === undefined || value === '') return 0;
+  if (typeof value === 'number') return isNaN(value) ? 0 : value;
+  var n = parseFloat(String(value).replace(/,/g, '').trim());
+  return isNaN(n) ? 0 : n;
+}
+
+/* Article Code join key: trimmed string, with a trailing ".0"-style
+   float artifact stripped (e.g. from a code that came through as a
+   float64 during parsing). */
+function normalizeArticleCode(value) {
+  if (value === null || value === undefined) return '';
+  var s = String(value).trim();
+  if (/^\d+\.0+$/.test(s)) s = s.split('.')[0];
+  return s;
+}
+
+/* Store Code join key: trimmed, upper-cased string. */
+function normalizeStoreCode(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim().toUpperCase();
+}
+
+function cellToTrimmedString(v) {
+  if (v === null || v === undefined) return '';
+  if (v instanceof Date) {
+    return isNaN(v.getTime()) ? '' : v.toISOString().slice(0, 10);
+  }
+  return String(v).trim();
+}
+
+/* Map one raw sheet row (array of cells) to a normalized complaint record
+   using a { key: columnIndex } field map. Missing columns become '' /0,
+   never throw. */
+function normalizeRecord(row, fieldMap, sourceSheetName) {
+  row = row || [];
+  fieldMap = fieldMap || {};
+  function get(key) {
+    var idx = fieldMap[key];
+    if (idx === undefined) return null;
+    var v = row[idx];
+    return v === undefined ? null : v;
+  }
+  return {
+    date: parseDateValue(get('date')) || '',
+    articleCode: normalizeArticleCode(get('articleCode')),
+    itemDescription: cellToTrimmedString(get('itemDescription')),
+    vendorName: cellToTrimmedString(get('vendorName')),
+    issueDescription: cellToTrimmedString(get('issueDescription')),
+    batchCode: cellToTrimmedString(get('batchCode')),
+    storeCode: normalizeStoreCode(get('storeCode') || ''),
+    storeLocation: cellToTrimmedString(get('storeLocation')),
+    defectQty: toNumber(get('defectQty')),
+    category: cellToTrimmedString(get('category')),
+    rootCause: cellToTrimmedString(get('rootCause')),
+    containmentAction: cellToTrimmedString(get('containmentAction')),
+    status: cellToTrimmedString(get('status')),
+    closureTarget: parseDateValue(get('closureTarget')) || '',
+    vendorRemarks: cellToTrimmedString(get('vendorRemarks')),
+    storeRemarks: cellToTrimmedString(get('storeRemarks')),
+    smName: cellToTrimmedString(get('smName')),
+    smNumber: cellToTrimmedString(get('smNumber')),
+    smEmail: cellToTrimmedString(get('smEmail')),
+    clusterLeader: cellToTrimmedString(get('clusterLeader')),
+    contactNumber: cellToTrimmedString(get('contactNumber')),
+    complaintStage: cellToTrimmedString(get('complaintStage')),
+    dateOfManufacturing: parseDateValue(get('dateOfManufacturing'), { mmYYYY: true }) || '',
+    sourceSheet: sourceSheetName || ''
+  };
+}
+
+/* Convert all data rows after the header row of a sheet into normalized
+   records. Blank rows are skipped. */
+function rowsToRecords(rows, headerRowIdx, fieldMap, sourceSheetName) {
+  rows = rows || [];
+  var out = [];
+  for (var i = headerRowIdx + 1; i < rows.length; i++) {
+    var row = rows[i];
+    if (!row) continue;
+    var blank = true;
+    for (var j = 0; j < row.length; j++) {
+      if (row[j] !== null && row[j] !== undefined && row[j] !== '') { blank = false; break; }
+    }
+    if (blank) continue;
+    out.push(normalizeRecord(row, fieldMap, sourceSheetName));
+  }
+  return out;
+}
+
+/* Build { storeCode: { storeName, rom, rm } } from a raw ROM & RM mapping
+   sheet (array-of-arrays, header row auto-detected). */
+function buildRomMappingFromRows(rows) {
+  var info = analyzeSheet(rows, ROM_FIELD_RULES, 10);
+  var fieldMap = info.fieldMap;
+  var mapping = {};
+  for (var i = info.headerRowIdx + 1; i < (rows || []).length; i++) {
+    var row = rows[i];
+    if (!row) continue;
+    var codeIdx = fieldMap.storeCode;
+    if (codeIdx === undefined) continue;
+    var codeRaw = row[codeIdx];
+    if (codeRaw === null || codeRaw === undefined || codeRaw === '') continue;
+    var code = normalizeStoreCode(codeRaw);
+    mapping[code] = {
+      storeName: fieldMap.storeName !== undefined ? cellToTrimmedString(row[fieldMap.storeName]) : '',
+      rom: fieldMap.rom !== undefined ? cellToTrimmedString(row[fieldMap.rom]) : '',
+      rm: fieldMap.rm !== undefined ? cellToTrimmedString(row[fieldMap.rm]) : ''
+    };
+  }
+  return mapping;
+}
+
+/* Build { sections: string[], articles: { articleCode: [sectionIndex, mapValue] } }
+   from a raw Article Section/MAP sheet (array-of-arrays). Section strings
+   are de-duplicated into an index array to keep the JSON compact. */
+function buildArticleMapFromRows(rows) {
+  var info = analyzeSheet(rows, ARTICLE_FIELD_RULES, 10);
+  var fieldMap = info.fieldMap;
+  var sections = [];
+  var sectionIndexByName = {};
+  var articles = {};
+  for (var i = info.headerRowIdx + 1; i < (rows || []).length; i++) {
+    var row = rows[i];
+    if (!row) continue;
+    var codeIdx = fieldMap.articleCode;
+    if (codeIdx === undefined) continue;
+    var codeRaw = row[codeIdx];
+    if (codeRaw === null || codeRaw === undefined || codeRaw === '') continue;
+    var code = normalizeArticleCode(codeRaw);
+    var sectionName = fieldMap.section !== undefined ? cellToTrimmedString(row[fieldMap.section]) : '';
+    var mapValue = fieldMap.mapValue !== undefined ? toNumber(row[fieldMap.mapValue]) : 0;
+    var idx = sectionIndexByName[sectionName];
+    if (idx === undefined) {
+      idx = sections.length;
+      sections.push(sectionName);
+      sectionIndexByName[sectionName] = idx;
+    }
+    articles[code] = [idx, mapValue];
+  }
+  return { sections: sections, articles: articles };
+}
+
+/* Join ROM/RM mapping onto records by Store Code. Never clobbers a
+   record's own non-blank storeLocation with the mapping's store name. */
+function joinRomMapping(records, romMapping) {
+  if (!romMapping) return records;
+  return (records || []).map(function (r) {
+    var key = normalizeStoreCode(r.storeCode);
+    var m = romMapping[key];
+    if (!m) return r;
+    var out = {};
+    for (var k in r) out[k] = r[k];
+    out.rom = m.rom || '';
+    out.rm = m.rm || '';
+    if (!out.storeLocation && m.storeName) out.storeLocation = m.storeName;
+    return out;
+  });
+}
+
+/* Join Article Section/MAP mapping onto records by Article Code. Attaches
+   section, mapValue and a derived mapImpact = defectQty * mapValue. */
+function joinArticleMap(records, articleMap) {
+  if (!articleMap || !articleMap.articles) return records;
+  var sections = articleMap.sections || [];
+  var articles = articleMap.articles;
+  return (records || []).map(function (r) {
+    var code = normalizeArticleCode(r.articleCode);
+    var entry = articles[code];
+    if (!entry) return r;
+    var out = {};
+    for (var k in r) out[k] = r[k];
+    var sectionIdx = entry[0];
+    var mapValueRaw = entry[1];
+    out.section = sections[sectionIdx] || '';
+    var mapValue = typeof mapValueRaw === 'number' ? mapValueRaw : Number(mapValueRaw);
+    out.mapValue = isNaN(mapValue) ? null : mapValue;
+    out.mapImpact = (out.mapValue !== null && typeof r.defectQty === 'number' && !isNaN(r.defectQty))
+      ? r.defectQty * out.mapValue
+      : null;
+    return out;
+  });
+}
+
+/* Format a number as Indian-locale currency with no decimals. */
+function formatINR(n) {
+  var rounded = Math.round(n || 0);
+  return '₹' + rounded.toLocaleString('en-IN');
+}
+
+/* Classify a status string into one of style.css's known status-pill
+   classes for consistent table rendering. */
+function statusPillClass(status) {
+  var s = (status || '').toLowerCase().trim();
+  if (/close/.test(s)) return 'status-closed';
+  if (/wip|progress/.test(s)) return 'status-wip';
+  if (/open/.test(s)) return 'status-open';
+  if (/pending/.test(s)) return 'status-pending';
+  return 'status-other';
+}
+
+/* KPI computation over a (possibly filtered) record set. */
+function computeKpis(records) {
+  records = records || [];
+  var total = records.length;
+  var closed = 0;
+  var defectQtyTotal = 0;
+  var mapImpactTotal = 0;
+  var hasMapImpact = false;
+  var stores = {};
+  var storeCount = 0;
+  for (var i = 0; i < records.length; i++) {
+    var r = records[i];
+    if (/close/i.test(r.status || '')) closed++;
+    if (typeof r.defectQty === 'number' && !isNaN(r.defectQty)) defectQtyTotal += r.defectQty;
+    if (r.mapImpact !== null && r.mapImpact !== undefined && !isNaN(r.mapImpact)) {
+      mapImpactTotal += r.mapImpact;
+      hasMapImpact = true;
+    }
+    if (r.storeCode && !stores[r.storeCode]) { stores[r.storeCode] = true; storeCount++; }
+  }
+  return {
+    total: total,
+    closed: closed,
+    openWip: total - closed,
+    defectQtyTotal: defectQtyTotal,
+    storesAffected: storeCount,
+    hasMapImpact: hasMapImpact,
+    mapImpactTotal: mapImpactTotal,
+    mapImpactFormatted: formatINR(mapImpactTotal)
+  };
+}
+
+/* UTF-8 safe base64 encoding (browsers' native btoa() mangles non-Latin1
+   characters like the rupee sign or the E-with-acute in "HAMLEYS CAFE").
+   Works in both the browser (TextEncoder + btoa) and Node (Buffer). */
+function utf8ToBase64(str) {
+  var bytes;
+  if (typeof TextEncoder !== 'undefined') {
+    bytes = new TextEncoder().encode(str);
+  } else {
+    bytes = new Uint8Array(Buffer.from(str, 'utf-8'));
+  }
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(bytes).toString('base64');
+  }
+  var binary = '';
+  var chunkSize = 0x8000;
+  for (var i = 0; i < bytes.length; i += chunkSize) {
+    var chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    ADMIN_PASSCODE: ADMIN_PASSCODE,
+    FIELD_RULES: FIELD_RULES,
+    ROM_FIELD_RULES: ROM_FIELD_RULES,
+    ARTICLE_FIELD_RULES: ARTICLE_FIELD_RULES,
+    COMPLAINT_SHEET_MIN_MATCHES: COMPLAINT_SHEET_MIN_MATCHES,
+    normalizeHeader: normalizeHeader,
+    buildFieldMap: buildFieldMap,
+    detectHeaderRow: detectHeaderRow,
+    analyzeSheet: analyzeSheet,
+    isComplaintSheetCandidate: isComplaintSheetCandidate,
+    excelSerialToDate: excelSerialToDate,
+    parseDateValue: parseDateValue,
+    toNumber: toNumber,
+    normalizeArticleCode: normalizeArticleCode,
+    normalizeStoreCode: normalizeStoreCode,
+    normalizeRecord: normalizeRecord,
+    rowsToRecords: rowsToRecords,
+    buildRomMappingFromRows: buildRomMappingFromRows,
+    buildArticleMapFromRows: buildArticleMapFromRows,
+    joinRomMapping: joinRomMapping,
+    joinArticleMap: joinArticleMap,
+    formatINR: formatINR,
+    statusPillClass: statusPillClass,
+    computeKpis: computeKpis,
+    utf8ToBase64: utf8ToBase64
+  };
+}
+
+/* --------------------------- 2. BROWSER SECTION --------------------------- */
+
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+
+  /* ---------------------------- state ---------------------------- */
+  var records = [];
+  var romMapping = null;
+  var articleMap = null;
+  var fieldMapsBySheet = {};
+  var pendingWorkbookRows = null;
+  var isLiveData = false;
+  var publishedMeta = null;
+  var filterState = {};
+  var chartInstances = {};
+  var tableSortState = { key: 'date', dir: 'desc' };
+  var tableSearchTerm = '';
+
+  var FILTER_DEFS = [
+    { key: 'date', label: 'Date range', type: 'daterange' },
+    { key: 'storeCode', label: 'Store', type: 'select' },
+    { key: 'rom', label: 'ROM', type: 'select' },
+    { key: 'status', label: 'Status', type: 'select' },
+    { key: 'vendorName', label: 'Vendor', type: 'select' },
+    { key: 'section', label: 'Section', type: 'select' }
   ];
 
-  function normalizeHeader(h) {
-    return String(h == null ? "" : h).toLowerCase().replace(/[_\-\.]/g, " ").replace(/\s+/g, " ").trim();
-  }
-
-  function detectFieldMap(headers) {
-    // headers: array of raw header strings (row 1), in column order
-    const norm = headers.map(normalizeHeader);
-    const map = {};        // colIndex -> canonicalKey
-    const claimed = new Set();
-
-    norm.forEach((h, i) => {
-      if (!h) return;
-      for (const rule of FIELD_RULES) {
-        if (claimed.has(rule.key)) continue;
-        if (rule.test(h)) {
-          map[i] = rule.key;
-          claimed.add(rule.key);
-          break;
-        }
-      }
-    });
-
-    // Positional resolution for ambiguous "Contact Number" style columns:
-    // assign to whichever canonical contact-ish field is nearest above it
-    // and not yet mapped to a number, based on the immediately preceding
-    // mapped field (SM block vs Cluster block).
-    norm.forEach((h, i) => {
-      if (map[i]) return;
-      if (!/contact/.test(h) && !/number/.test(h)) return;
-      // look backwards for context
-      for (let j = i - 1; j >= 0; j--) {
-        const prevKey = map[j];
-        if (!prevKey) continue;
-        if (prevKey === "smName" || prevKey === "smEmail") {
-          if (!claimed.has("smNumber")) { map[i] = "smNumber"; claimed.add("smNumber"); }
-          break;
-        }
-        if (prevKey === "clusterLeader") {
-          if (!claimed.has("clusterContact")) { map[i] = "clusterContact"; claimed.add("clusterContact"); }
-          break;
-        }
-        break; // stop at first mapped column either way
-      }
-    });
-
-    return map; // colIndex -> canonicalKey (only for recognized columns)
-  }
-
-  const CANONICAL_LABELS = {
-    dateOfIssue: "Date of Issue",
-    manufacturingDate: "Manufacturing Date",
-    articleCode: "Article Code",
-    itemDescription: "Item Description",
-    vendorName: "Vendor Name",
-    issueDescription: "Issue Description",
-    complaintStage: "Complaint Stage",
-    batchCode: "Batch Code",
-    storeCode: "Store Code",
-    storeLocation: "Store Location",
-    defectQuantity: "Defect Quantity",
-    category: "Category",
-    rootCause: "Root Cause",
-    containmentAction: "Containment Action",
-    status: "Status",
-    closureTarget: "Closure Target",
-    vendorRemarks: "Vendor Remarks",
-    storeRemarks: "Store Remarks",
-    clusterLeader: "Cluster Quality Leader",
-    clusterContact: "Cluster Leader Contact",
-    smName: "Store Manager Name",
-    smEmail: "Store Manager Email",
-    smNumber: "Store Manager Contact",
-    rom: "ROM",
-    regionalManager: "RM"
-  };
-
-  // Preferred column order for CSV export
-  const TABLE_COLUMN_ORDER = [
-    "dateOfIssue","storeCode","storeLocation","rom","regionalManager","articleCode","itemDescription",
-    "vendorName","category","issueDescription","defectQuantity","rootCause",
-    "containmentAction","status","closureTarget","complaintStage","batchCode",
-    "manufacturingDate","smName","smNumber","smEmail","clusterLeader","clusterContact",
-    "vendorRemarks","storeRemarks"
+  var TABLE_COLUMNS = [
+    { key: 'date', label: 'Date' },
+    { key: 'storeCode', label: 'Store Code' },
+    { key: 'storeLocation', label: 'Store Location' },
+    { key: 'vendorName', label: 'Vendor Name' },
+    { key: 'itemDescription', label: 'Item Description' },
+    { key: 'category', label: 'Category' },
+    { key: 'status', label: 'Status' },
+    { key: 'defectQty', label: 'Defect Qty' },
+    { key: 'rom', label: 'ROM', optional: true },
+    { key: 'rm', label: 'RM', optional: true },
+    { key: 'section', label: 'Section', optional: true },
+    { key: 'mapValue', label: 'MAP Value', optional: true },
+    { key: 'mapImpact', label: 'MAP Impact', optional: true },
+    { key: 'sourceSheet', label: 'Source Sheet' }
   ];
 
-  /* ---------------------------------------------------------------------
-     Sheet ingestion
-     ------------------------------------------------------------------- */
-  function excelSerialToDate(v) {
-    if (v instanceof Date) return v;
-    if (typeof v === "number") {
-      // Excel serial date -> JS Date (days since 1899-12-30)
-      const utc = Math.round((v - 25569) * 86400 * 1000);
-      const d = new Date(utc);
-      if (!isNaN(d.getTime())) return d;
-    }
-    if (typeof v === "string") {
-      const s = v.trim();
-      // MMYYYY like "08/2025" or "112025"
-      let m = s.match(/^(\d{2})\/(\d{4})$/);
-      if (m) return new Date(parseInt(m[2], 10), parseInt(m[1], 10) - 1, 1);
-      const d = new Date(s);
-      if (!isNaN(d.getTime())) return d;
-    }
-    return null;
-  }
+  var CHART_COLORS = ['#E3001B', '#222225', '#7A7A80', '#1E8E4E', '#C77700', '#4A4A4E', '#B50014', '#D6D6DA'];
 
-  function isLikelyDataSheet(sheetJsonRows) {
-    if (!sheetJsonRows || sheetJsonRows.length < 2) return false;
-    const header = sheetJsonRows[0];
-    const populated = header.filter(c => c !== null && c !== undefined && String(c).trim() !== "");
-    return populated.length >= 8; // monthly complaint sheets have 18-21 cols; lookup/summary sheets don't
-  }
+  function byId(id) { return document.getElementById(id); }
 
-  function loadWorkbookFromArrayBuffer(buf) {
-    state.workbook = XLSX.read(buf, { type: "array", cellDates: true });
-    state.sheetNames = state.workbook.SheetNames;
-    renderSheetPicker();
-  }
+  var els = {
+    adminToggleBtn: byId('adminToggleBtn'),
+    liveBanner: byId('liveBanner'),
+    liveBannerMeta: byId('liveBannerMeta'),
+    loadDifferentFileBtn: byId('loadDifferentFileBtn'),
+    uploadSection: byId('uploadSection'),
+    dropZone: byId('dropZone'),
+    fileInput: byId('fileInput'),
+    browseBtn: byId('browseBtn'),
+    fileName: byId('fileName'),
+    sheetPicker: byId('sheetPicker'),
+    sheetCheckboxes: byId('sheetCheckboxes'),
+    loadSheetsBtn: byId('loadSheetsBtn'),
+    statusMsg: byId('statusMsg'),
+    dashboardContent: byId('dashboardContent'),
+    filtersGrid: byId('filtersGrid'),
+    resetFiltersBtn: byId('resetFiltersBtn'),
+    kpiGrid: byId('kpiGrid'),
+    chartRomEmpty: byId('chartRomEmpty'),
+    chartSectionsEmpty: byId('chartSectionsEmpty'),
+    tableSearch: byId('tableSearch'),
+    rowCount: byId('rowCount'),
+    dataTable: byId('dataTable'),
+    adminOverlay: byId('adminOverlay'),
+    adminCloseBtn: byId('adminCloseBtn'),
+    adminLoginView: byId('adminLoginView'),
+    adminPassword: byId('adminPassword'),
+    adminLoginBtn: byId('adminLoginBtn'),
+    adminError: byId('adminError'),
+    adminToolsView: byId('adminToolsView'),
+    columnMappingTable: byId('columnMappingTable'),
+    romMappingInput: byId('romMappingInput'),
+    romMappingStatus: byId('romMappingStatus'),
+    articleMapInput: byId('articleMapInput'),
+    articleMapStatus: byId('articleMapStatus'),
+    exportCsvBtn: byId('exportCsvBtn'),
+    ghToken: byId('ghToken'),
+    ghOwner: byId('ghOwner'),
+    ghRepo: byId('ghRepo'),
+    ghBranch: byId('ghBranch'),
+    ghPath: byId('ghPath'),
+    publishBtn: byId('publishBtn'),
+    publishStatus: byId('publishStatus'),
+    sessionInfo: byId('sessionInfo')
+  };
 
-  function renderSheetPicker() {
-    const wrap = document.getElementById("sheetCheckboxes");
-    wrap.innerHTML = "";
-    state.sheetNames.forEach(name => {
-      const ws = state.workbook.Sheets[name];
-      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
-      const looksLikeData = isLikelyDataSheet(rows);
+  /* ---------------------------- helpers ---------------------------- */
 
-      const id = "sheet_" + name.replace(/[^a-z0-9]/gi, "_");
-      const div = document.createElement("label");
-      div.className = "sheet-check";
-      div.innerHTML = `<input type="checkbox" id="${id}" value="${name}" ${looksLikeData ? "checked" : ""}/> ${name} <span style="color:#9a9aa0">(${rows.length ? rows.length - 1 : 0} rows${looksLikeData ? "" : ", not detected as complaint data"})</span>`;
-      wrap.appendChild(div);
+  function escapeHtml(str) {
+    return String(str === null || str === undefined ? '' : str).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
-    document.getElementById("sheetPicker").classList.remove("hidden");
-    document.getElementById("statusMsg").textContent = "Workbook loaded. Select sheets to include, then click \"Load selected sheets\".";
-    document.getElementById("statusMsg").className = "status-msg";
   }
 
-  function loadSelectedSheets() {
-    const checked = Array.from(document.querySelectorAll("#sheetCheckboxes input:checked")).map(cb => cb.value);
-    if (checked.length === 0) {
-      setStatus("Select at least one sheet to load.", "error");
-      return;
+  function showStatus(msg, type) {
+    if (!els.statusMsg) return;
+    els.statusMsg.textContent = msg || '';
+    els.statusMsg.className = 'status-msg' + (type ? ' ' + type : '');
+  }
+
+  function formatDateDisplay(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    return d.toLocaleString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+
+  /* ---------------------------- filters ---------------------------- */
+
+  function fieldHasValues(key) {
+    for (var i = 0; i < records.length; i++) {
+      var v = records[i][key];
+      if (v !== undefined && v !== null && String(v).trim() !== '') return true;
     }
-    state.selectedSheets = checked;
-    state.records = [];
-    state.fields = {};
-    state.fieldsPresent = new Set();
+    return false;
+  }
 
-    checked.forEach(sheetName => {
-      const ws = state.workbook.Sheets[sheetName];
-      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
-      if (rows.length < 2) return;
-
-      const headers = rows[0];
-      const colMap = detectFieldMap(headers);
-
-      // record mapping info for admin view
-      Object.entries(colMap).forEach(([colIdx, key]) => {
-        if (!state.fields[key]) state.fields[key] = [];
-        state.fields[key].push({ sheet: sheetName, header: headers[colIdx] });
-        state.fieldsPresent.add(key);
+  function buildFiltersGrid() {
+    if (!els.filtersGrid) return;
+    var active = FILTER_DEFS.filter(function (def) { return fieldHasValues(def.key); });
+    var html = active.map(function (def) {
+      if (def.type === 'daterange') {
+        var from = filterState[def.key + 'From'] || '';
+        var to = filterState[def.key + 'To'] || '';
+        return '<div class="filter-field"><label>' + escapeHtml(def.label) + '</label>' +
+          '<div style="display:flex; gap:6px;">' +
+          '<input type="date" data-filter="' + def.key + 'From" value="' + escapeHtml(from) + '" />' +
+          '<input type="date" data-filter="' + def.key + 'To" value="' + escapeHtml(to) + '" />' +
+          '</div></div>';
+      }
+      var seen = {};
+      var values = [];
+      records.forEach(function (r) {
+        var v = r[def.key];
+        if (v === undefined || v === null) return;
+        v = String(v).trim();
+        if (!v || seen[v]) return;
+        seen[v] = true;
+        values.push(v);
       });
+      values.sort(function (a, b) { return a.localeCompare(b); });
+      var current = filterState[def.key] || '';
+      return '<div class="filter-field"><label>' + escapeHtml(def.label) + '</label>' +
+        '<select data-filter="' + def.key + '"><option value="">All</option>' +
+        values.map(function (v) {
+          return '<option value="' + escapeHtml(v) + '"' + (current === v ? ' selected' : '') + '>' + escapeHtml(v) + '</option>';
+        }).join('') +
+        '</select></div>';
+    }).join('');
+    els.filtersGrid.innerHTML = html;
+    Array.prototype.forEach.call(els.filtersGrid.querySelectorAll('[data-filter]'), function (el) {
+      el.addEventListener('change', function (e) {
+        filterState[e.target.getAttribute('data-filter')] = e.target.value;
+        renderAll();
+      });
+    });
+  }
 
-      for (let r = 1; r < rows.length; r++) {
-        const row = rows[r];
-        if (!row || row.every(c => c === null || c === undefined || String(c).trim() === "")) continue;
+  function applyFilters() {
+    return records.filter(function (r) {
+      for (var i = 0; i < FILTER_DEFS.length; i++) {
+        var def = FILTER_DEFS[i];
+        if (def.type === 'daterange') {
+          var from = filterState[def.key + 'From'];
+          var to = filterState[def.key + 'To'];
+          var val = r[def.key];
+          if (from && (!val || val < from)) return false;
+          if (to && (!val || val > to)) return false;
+        } else {
+          var sel = filterState[def.key];
+          if (sel && String(r[def.key] || '') !== sel) return false;
+        }
+      }
+      return true;
+    });
+  }
 
-        const record = { __sheet: sheetName, __extra: {} };
-        headers.forEach((h, i) => {
-          const key = colMap[i];
-          const rawVal = row[i] !== undefined ? row[i] : null;
-          if (key) {
-            record[key] = rawVal;
-          } else if (h !== null && h !== undefined && String(h).trim() !== "") {
-            const cleanHeader = String(h).trim();
-            record.__extra[cleanHeader] = rawVal;
-          }
+  /* ---------------------------- KPIs ---------------------------- */
+
+  function renderKpis(filtered) {
+    if (!els.kpiGrid) return;
+    var k = computeKpis(filtered);
+    var cards = [
+      { label: 'Total Complaints', value: k.total.toLocaleString('en-IN') },
+      { label: 'Open / WIP', value: k.openWip.toLocaleString('en-IN') },
+      { label: 'Closed', value: k.closed.toLocaleString('en-IN') },
+      { label: 'Total Defect Quantity', value: Math.round(k.defectQtyTotal).toLocaleString('en-IN') },
+      { label: 'Stores Affected', value: k.storesAffected.toLocaleString('en-IN') }
+    ];
+    if (k.hasMapImpact) {
+      cards.push({ label: 'Estimated MAP Value Impact', value: k.mapImpactFormatted });
+    }
+    els.kpiGrid.innerHTML = cards.map(function (c) {
+      return '<div class="kpi-card"><div class="kpi-label">' + escapeHtml(c.label) +
+        '</div><div class="kpi-value">' + escapeHtml(String(c.value)) + '</div></div>';
+    }).join('');
+  }
+
+  /* ---------------------------- charts ---------------------------- */
+
+  function groupSum(list, keyFn, valueFn) {
+    var map = {};
+    var order = [];
+    list.forEach(function (item) {
+      var k = keyFn(item);
+      if (k === null || k === undefined || k === '') return;
+      if (!map.hasOwnProperty(k)) { map[k] = 0; order.push(k); }
+      map[k] += valueFn(item);
+    });
+    return order.map(function (k) { return [k, map[k]]; });
+  }
+
+  function topN(entries, n) {
+    return entries.slice().sort(function (a, b) { return b[1] - a[1]; }).slice(0, n);
+  }
+
+  function destroyChart(id) {
+    if (chartInstances[id]) { chartInstances[id].destroy(); delete chartInstances[id]; }
+  }
+
+  function renderChart(id, config) {
+    var canvas = byId(id);
+    if (!canvas || typeof Chart === 'undefined') return;
+    destroyChart(id);
+    chartInstances[id] = new Chart(canvas.getContext('2d'), config);
+  }
+
+  function horizontalBarConfig(entries, label, color) {
+    return {
+      type: 'bar',
+      data: { labels: entries.map(function (e) { return e[0]; }), datasets: [{ label: label, data: entries.map(function (e) { return e[1]; }), backgroundColor: color }] },
+      options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true } } }
+    };
+  }
+
+  function renderCharts(filtered) {
+    var statusEntries = groupSum(filtered, function (r) { return (r.status || 'Unknown').trim() || 'Unknown'; }, function () { return 1; });
+    renderChart('chartStatus', {
+      type: 'doughnut',
+      data: { labels: statusEntries.map(function (e) { return e[0]; }), datasets: [{ data: statusEntries.map(function (e) { return e[1]; }), backgroundColor: CHART_COLORS }] },
+      options: { plugins: { legend: { position: 'bottom' } } }
+    });
+
+    var hasRom = records.some(function (r) { return !!r.rom; });
+    if (els.chartRomEmpty) els.chartRomEmpty.classList.toggle('hidden', hasRom);
+    if (hasRom) {
+      var romEntries = groupSum(filtered, function (r) { return r.rom; }, function (r) { return r.defectQty || 0; });
+      romEntries.sort(function (a, b) { return b[1] - a[1]; });
+      renderChart('chartRom', {
+        type: 'bar',
+        data: { labels: romEntries.map(function (e) { return e[0]; }), datasets: [{ label: 'Defect qty', data: romEntries.map(function (e) { return e[1]; }), backgroundColor: '#E3001B' }] },
+        options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+      });
+    } else {
+      destroyChart('chartRom');
+    }
+
+    var trendMap = {};
+    filtered.forEach(function (r) {
+      if (!r.date) return;
+      var m = String(r.date).slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(m)) return;
+      trendMap[m] = (trendMap[m] || 0) + 1;
+    });
+    var trendKeys = Object.keys(trendMap).sort();
+    renderChart('chartTrend', {
+      type: 'line',
+      data: { labels: trendKeys, datasets: [{ label: 'Complaints', data: trendKeys.map(function (k) { return trendMap[k]; }), borderColor: '#E3001B', backgroundColor: 'rgba(227,0,27,0.15)', fill: true, tension: 0.25 }] },
+      options: { plugins: { legend: { display: false } } }
+    });
+
+    var vendorEntries = topN(groupSum(filtered, function (r) { return r.vendorName; }, function (r) { return r.defectQty || 0; }), 10);
+    renderChart('chartVendorsTop10', horizontalBarConfig(vendorEntries, 'Defect qty', '#222225'));
+
+    var articleEntries = topN(groupSum(filtered, function (r) { return r.itemDescription; }, function (r) { return r.defectQty || 0; }), 10);
+    renderChart('chartArticlesTop10', horizontalBarConfig(articleEntries, 'Defect qty', '#7A7A80'));
+
+    var hasSection = records.some(function (r) { return !!r.section; });
+    if (els.chartSectionsEmpty) els.chartSectionsEmpty.classList.toggle('hidden', hasSection);
+    if (hasSection) {
+      var sectionEntries = topN(groupSum(filtered, function (r) { return r.section; }, function (r) { return r.defectQty || 0; }), 10);
+      renderChart('chartSectionsTop10', horizontalBarConfig(sectionEntries, 'Defect qty', '#B50014'));
+    } else {
+      destroyChart('chartSectionsTop10');
+    }
+  }
+
+  /* ---------------------------- table ---------------------------- */
+
+  function renderTable(filtered) {
+    if (!els.dataTable) return;
+    var rows = filtered.slice();
+    if (tableSearchTerm) {
+      var term = tableSearchTerm.toLowerCase();
+      rows = rows.filter(function (r) {
+        return TABLE_COLUMNS.some(function (c) {
+          var v = r[c.key];
+          return v !== undefined && v !== null && String(v).toLowerCase().indexOf(term) !== -1;
         });
-        state.records.push(record);
-      }
+      });
+    }
+    if (tableSortState.key) {
+      var key = tableSortState.key, dir = tableSortState.dir;
+      rows.sort(function (a, b) {
+        var av = a[key], bv = b[key];
+        if (av === null || av === undefined || av === '') return 1;
+        if (bv === null || bv === undefined || bv === '') return -1;
+        if (typeof av === 'number' && typeof bv === 'number') return dir === 'asc' ? av - bv : bv - av;
+        return dir === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+      });
+    }
+    if (els.rowCount) els.rowCount.textContent = rows.length.toLocaleString('en-IN') + (rows.length === 1 ? ' row' : ' rows');
+
+    var cols = TABLE_COLUMNS.filter(function (c) {
+      if (!c.optional) return true;
+      return records.some(function (r) { return r[c.key] !== undefined && r[c.key] !== null && r[c.key] !== ''; });
     });
 
-    if (state.records.length === 0) {
-      setStatus("No data rows found in the selected sheet(s).", "error");
+    var theadRow = '<tr>' + cols.map(function (c) {
+      var arrow = tableSortState.key === c.key ? (' <span class="sort-arrow">' + (tableSortState.dir === 'asc' ? '▲' : '▼') + '</span>') : '';
+      return '<th data-key="' + c.key + '">' + escapeHtml(c.label) + arrow + '</th>';
+    }).join('') + '</tr>';
+
+    var tbodyHtml = rows.map(function (r) {
+      return '<tr>' + cols.map(function (c) {
+        var v = r[c.key];
+        if (c.key === 'status') {
+          return '<td><span class="status-pill ' + statusPillClass(v) + '">' + escapeHtml(v || '-') + '</span></td>';
+        }
+        if (c.key === 'mapValue' || c.key === 'mapImpact') {
+          v = (typeof v === 'number' && !isNaN(v)) ? v.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : '';
+        } else if (c.key === 'defectQty') {
+          v = (typeof v === 'number' && !isNaN(v)) ? v.toLocaleString('en-IN') : v;
+        }
+        return '<td>' + escapeHtml(v === null || v === undefined ? '' : String(v)) + '</td>';
+      }).join('') + '</tr>';
+    }).join('');
+
+    var thead = els.dataTable.querySelector('thead');
+    var tbody = els.dataTable.querySelector('tbody');
+    if (thead) thead.innerHTML = theadRow;
+    if (tbody) tbody.innerHTML = tbodyHtml || ('<tr><td colspan="' + cols.length + '" style="text-align:center;color:var(--grey-500);padding:20px;">No rows match.</td></tr>');
+  }
+
+  function wireTableEvents() {
+    if (els.tableSearch) {
+      els.tableSearch.addEventListener('input', function (e) {
+        tableSearchTerm = e.target.value;
+        renderAll();
+      });
+    }
+    if (els.dataTable) {
+      var thead = els.dataTable.querySelector('thead');
+      if (thead) {
+        thead.addEventListener('click', function (e) {
+          var th = e.target.closest ? e.target.closest('th') : null;
+          if (!th) return;
+          var key = th.getAttribute('data-key');
+          if (!key) return;
+          if (tableSortState.key === key) {
+            tableSortState.dir = tableSortState.dir === 'asc' ? 'desc' : 'asc';
+          } else {
+            tableSortState.key = key;
+            tableSortState.dir = 'asc';
+          }
+          renderAll();
+        });
+      }
+    }
+  }
+
+  /* ---------------------------- render orchestration ---------------------------- */
+
+  function renderAll() {
+    var filtered = applyFilters();
+    renderKpis(filtered);
+    renderCharts(filtered);
+    renderTable(filtered);
+  }
+
+  /* ---------------------------- admin: column mapping + session info ---------------------------- */
+
+  function renderColumnMappingTable() {
+    if (!els.columnMappingTable) return;
+    var sheetNames = Object.keys(fieldMapsBySheet);
+    if (!sheetNames.length) {
+      els.columnMappingTable.innerHTML = '<p class="admin-note">No workbook has been manually loaded this session yet (data may be coming from the published live file instead).</p>';
       return;
     }
-
-    applyRomMapping();
-    setStatus(`Loaded ${state.records.length} records from ${checked.length} sheet(s).`, "success");
-    state.dataSource = "upload";
-    hideLiveBanner();
-    showDashboard();
-  }
-
-  function showDashboard() {
-    document.getElementById("dashboardContent").classList.remove("hidden");
-    buildFilters();
-    applyFiltersAndRender();
-  }
-
-  function setStatus(msg, type) {
-    const el = document.getElementById("statusMsg");
-    el.textContent = msg;
-    el.className = "status-msg" + (type ? " " + type : "");
-  }
-
-  /* ---------------------------------------------------------------------
-     Filters
-     ------------------------------------------------------------------- */
-  function uniqueValues(key) {
-    const set = new Set();
-    state.records.forEach(r => {
-      const v = r[key];
-      if (v !== null && v !== undefined && String(v).trim() !== "") set.add(String(v).trim());
-    });
-    return Array.from(set).sort();
-  }
-
-  function buildFilters() {
-    const grid = document.getElementById("filtersGrid");
-    grid.innerHTML = "";
-    state.filters = {};
-
-    const categoricalCandidates = ["storeCode", "storeLocation", "rom", "status", "vendorName", "clusterLeader"];
-    categoricalCandidates.forEach(key => {
-      if (!state.fieldsPresent.has(key)) return;
-      const values = uniqueValues(key);
-      if (values.length === 0 || values.length > 400) return;
-
-      const field = document.createElement("div");
-      field.className = "filter-field";
-      const label = CANONICAL_LABELS[key] || key;
-      field.innerHTML = `
-        <label for="filter_${key}">${label}</label>
-        <select id="filter_${key}">
-          <option value="">All</option>
-          ${values.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("")}
-        </select>`;
-      grid.appendChild(field);
-      state.filters[key] = "";
-    });
-
-    // date filter
-    if (state.fieldsPresent.has("dateOfIssue")) {
-      const field = document.createElement("div");
-      field.className = "filter-field";
-      field.innerHTML = `
-        <label for="filter_dateFrom">From date</label>
-        <input type="date" id="filter_dateFrom" />`;
-      grid.appendChild(field);
-
-      const field2 = document.createElement("div");
-      field2.className = "filter-field";
-      field2.innerHTML = `
-        <label for="filter_dateTo">To date</label>
-        <input type="date" id="filter_dateTo" />`;
-      grid.appendChild(field2);
-      state.filters.dateFrom = "";
-      state.filters.dateTo = "";
-    }
-
-    grid.querySelectorAll("select, input").forEach(el => {
-      el.addEventListener("change", () => {
-        const id = el.id.replace("filter_", "");
-        state.filters[id] = el.value;
-        applyFiltersAndRender();
+    var html = '<table><thead><tr><th>Sheet</th><th>Detected field</th><th>Source column header</th></tr></thead><tbody>';
+    sheetNames.forEach(function (name) {
+      var info = fieldMapsBySheet[name];
+      Object.keys(info.fieldMap).forEach(function (key) {
+        var colIdx = info.fieldMap[key];
+        var header = info.headerRow[colIdx];
+        html += '<tr><td>' + escapeHtml(name) + '</td><td>' + escapeHtml(key) + '</td><td>' + escapeHtml(header === null || header === undefined ? '' : String(header)) + '</td></tr>';
       });
     });
+    html += '</tbody></table>';
+    els.columnMappingTable.innerHTML = html;
   }
 
-  function resetFilters() {
-    document.querySelectorAll("#filtersGrid select").forEach(s => s.value = "");
-    document.querySelectorAll("#filtersGrid input").forEach(i => i.value = "");
-    Object.keys(state.filters).forEach(k => state.filters[k] = "");
-    applyFiltersAndRender();
+  function renderSessionInfo() {
+    if (!els.sessionInfo) return;
+    var parts = [];
+    parts.push((isLiveData ? 'Live published data' : 'Manually loaded data') + ' — ' + records.length.toLocaleString('en-IN') + ' complaint rows.');
+    parts.push(romMapping ? ('ROM/RM mapping loaded (' + Object.keys(romMapping).length.toLocaleString('en-IN') + ' stores).') : 'ROM/RM mapping not loaded.');
+    parts.push(articleMap ? ('Article Section/MAP mapping loaded (' + Object.keys(articleMap.articles).length.toLocaleString('en-IN') + ' articles).') : 'Article Section/MAP mapping not loaded.');
+    els.sessionInfo.innerHTML = parts.map(function (p) { return '<div>' + escapeHtml(p) + '</div>'; }).join('');
   }
 
-  function getFilteredRecords() {
-    return state.records.filter(r => {
-      for (const key of ["storeCode", "storeLocation", "rom", "status", "vendorName", "clusterLeader"]) {
-        const fv = state.filters[key];
-        if (fv && String(r[key] || "").trim() !== fv) return false;
-      }
-      if (state.filters.dateFrom || state.filters.dateTo) {
-        const d = excelSerialToDate(r.dateOfIssue);
-        if (!d) return false;
-        if (state.filters.dateFrom) {
-          const from = new Date(state.filters.dateFrom);
-          if (d < from) return false;
-        }
-        if (state.filters.dateTo) {
-          const to = new Date(state.filters.dateTo);
-          to.setHours(23, 59, 59, 999);
-          if (d > to) return false;
-        }
-      }
-      return true;
-    });
+  /* ---------------------------- upload / sheet picker ---------------------------- */
+
+  function sheetToRows(worksheet) {
+    return XLSX.utils.sheet_to_json(worksheet, { header: 1, raw: true, defval: null });
   }
 
-  /* ---------------------------------------------------------------------
-     KPIs
-     ------------------------------------------------------------------- */
-  function renderKpis(rows) {
-    const grid = document.getElementById("kpiGrid");
-    grid.innerHTML = "";
-
-    const totalComplaints = rows.length;
-
-    let totalDefectQty = 0, qtyCount = 0;
-    rows.forEach(r => {
-      const v = r.defectQuantity;
-      if (typeof v === "number") { totalDefectQty += v; qtyCount++; }
-      else if (typeof v === "string" && v.trim() !== "" && !isNaN(Number(v))) { totalDefectQty += Number(v); qtyCount++; }
-    });
-
-    let closed = 0, open = 0, statusKnown = 0;
-    rows.forEach(r => {
-      const s = String(r.status || "").trim().toLowerCase();
-      if (!s) return;
-      statusKnown++;
-      if (s === "closed" || s === "close") closed++;
-      else open++;
-    });
-    const closureRate = statusKnown ? Math.round((closed / statusKnown) * 100) : null;
-
-    const uniqueStores = state.fieldsPresent.has("storeCode") ? new Set(rows.map(r => r.storeCode).filter(Boolean)).size : null;
-    const uniqueVendors = state.fieldsPresent.has("vendorName") ? new Set(rows.map(r => r.vendorName).filter(Boolean)).size : null;
-
-    const cards = [];
-    cards.push({ label: "Total Complaints", value: totalComplaints.toLocaleString() });
-    if (qtyCount > 0) cards.push({ label: "Total Defect Qty", value: totalDefectQty.toLocaleString() });
-    if (statusKnown > 0) cards.push({ label: "Closure Rate", value: closureRate + "%", sub: `${closed} closed / ${open} open` });
-    if (uniqueStores !== null) cards.push({ label: "Stores Affected", value: uniqueStores.toLocaleString() });
-    if (uniqueVendors !== null) cards.push({ label: "Vendors Involved", value: uniqueVendors.toLocaleString() });
-
-    cards.forEach(c => {
-      const div = document.createElement("div");
-      div.className = "kpi-card";
-      div.innerHTML = `
-        <div class="kpi-label">${c.label}</div>
-        <div class="kpi-value">${c.value}</div>
-        ${c.sub ? `<div class="kpi-sub">${c.sub}</div>` : ""}`;
-      grid.appendChild(div);
-    });
+  function renderSheetPicker(sheetsRows) {
+    var names = Object.keys(sheetsRows);
+    els.sheetCheckboxes.innerHTML = names.map(function (name) {
+      var info = analyzeSheet(sheetsRows[name], FIELD_RULES, 10);
+      var isCandidate = info.matchCount >= COMPLAINT_SHEET_MIN_MATCHES;
+      var safeId = 'sheetchk_' + name.replace(/[^a-z0-9]+/gi, '_');
+      return '<label class="sheet-check"><input type="checkbox" id="' + safeId + '" value="' + escapeHtml(name) + '" ' + (isCandidate ? 'checked' : '') + '/> ' +
+        escapeHtml(name) + ' <span style="color:var(--grey-500)">(' + info.matchCount + ' fields matched)</span></label>';
+    }).join('');
+    els.sheetPicker.classList.remove('hidden');
   }
 
-  /* ---------------------------------------------------------------------
-     Charts
-     ------------------------------------------------------------------- */
-  const CHART_COLORS = ["#E3001B", "#222225", "#7A7A80", "#C77700", "#1E8E4E", "#4A4A4E", "#B50014", "#D6D6DA"];
-
-  function destroyChart(key) {
-    if (state.charts[key]) { state.charts[key].destroy(); delete state.charts[key]; }
-  }
-
-  function countBy(rows, key) {
-    const map = new Map();
-    rows.forEach(r => {
-      const v = r[key];
-      const label = (v === null || v === undefined || String(v).trim() === "") ? "(blank)" : String(v).trim();
-      map.set(label, (map.get(label) || 0) + 1);
-    });
-    return map;
-  }
-
-  // Sums Defect Quantity per group when that field is present anywhere in the
-  // dataset (the "defects reported" metric); falls back to a simple complaint
-  // count per group when no defect-quantity column was detected at all.
-  function sumDefectsBy(rows, key) {
-    const hasQty = state.fieldsPresent.has("defectQuantity");
-    const map = new Map();
-    rows.forEach(r => {
-      const v = r[key];
-      const label = (v === null || v === undefined || String(v).trim() === "") ? "(blank)" : String(v).trim();
-      let amount = 1;
-      if (hasQty) {
-        const q = r.defectQuantity;
-        amount = typeof q === "number" ? q : (typeof q === "string" && q.trim() !== "" && !isNaN(Number(q)) ? Number(q) : 0);
-      }
-      map.set(label, (map.get(label) || 0) + amount);
-    });
-    return map;
-  }
-
-  function renderCharts(rows) {
-    renderStatusChart(rows);
-    renderRomChart(rows);
-    renderTrendChart(rows);
-    renderVendorsChart(rows);
-    renderArticlesChart(rows);
-  }
-
-  function renderStatusChart(rows) {
-    const card = document.getElementById("chartStatus").closest(".chart-card");
-    if (!state.fieldsPresent.has("status")) { card.classList.add("hidden"); return; }
-    card.classList.remove("hidden");
-    const map = countBy(rows, "status");
-    const labels = Array.from(map.keys());
-    const data = Array.from(map.values());
-
-    destroyChart("status");
-    state.charts.status = new Chart(document.getElementById("chartStatus"), {
-      type: "doughnut",
-      data: { labels, datasets: [{ data, backgroundColor: CHART_COLORS }] },
-      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } }
-    });
-  }
-
-  function renderTrendChart(rows) {
-    const card = document.getElementById("chartTrend").closest(".chart-card");
-    if (!state.fieldsPresent.has("dateOfIssue")) { card.classList.add("hidden"); return; }
-    card.classList.remove("hidden");
-
-    const monthMap = new Map();
-    rows.forEach(r => {
-      const d = excelSerialToDate(r.dateOfIssue);
-      if (!d) return;
-      const key = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
-      monthMap.set(key, (monthMap.get(key) || 0) + 1);
-    });
-    const sortedKeys = Array.from(monthMap.keys()).sort();
-    const labels = sortedKeys.map(k => {
-      const [y, m] = k.split("-");
-      return new Date(Number(y), Number(m) - 1, 1).toLocaleDateString("en-GB", { month: "short", year: "2-digit" });
-    });
-
-    destroyChart("trend");
-    state.charts.trend = new Chart(document.getElementById("chartTrend"), {
-      type: "line",
-      data: {
-        labels,
-        datasets: [{
-          label: "Complaints per month",
-          data: sortedKeys.map(k => monthMap.get(k)),
-          borderColor: "#E3001B",
-          backgroundColor: "rgba(227,0,27,0.12)",
-          fill: true,
-          tension: 0.25,
-          pointRadius: 4
-        }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
-      }
-    });
-  }
-
-  function renderRomChart(rows) {
-    const card = document.getElementById("chartRom").closest(".chart-card");
-    const emptyMsg = document.getElementById("chartRomEmpty");
-    const canvas = document.getElementById("chartRom");
-    card.classList.remove("hidden");
-
-    if (!state.fieldsPresent.has("rom")) {
-      canvas.classList.add("hidden");
-      emptyMsg.classList.remove("hidden");
-      destroyChart("rom");
-      return;
-    }
-    canvas.classList.remove("hidden");
-    emptyMsg.classList.add("hidden");
-
-    const map = countBy(rows, "rom");
-    const sorted = Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
-
-    destroyChart("rom");
-    state.charts.rom = new Chart(canvas, {
-      type: "bar",
-      data: {
-        labels: sorted.map(e => e[0]),
-        datasets: [{ label: "Issues reported", data: sorted.map(e => e[1]), backgroundColor: "#E3001B" }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
-      }
-    });
-  }
-
-  function renderVendorsChart(rows) {
-    const card = document.getElementById("chartVendorsTop10").closest(".chart-card");
-    if (!state.fieldsPresent.has("vendorName")) { card.classList.add("hidden"); return; }
-    card.classList.remove("hidden");
-
-    const map = sumDefectsBy(rows, "vendorName");
-    const sorted = Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
-    const metricLabel = state.fieldsPresent.has("defectQuantity") ? "Defect quantity" : "Complaints";
-
-    destroyChart("vendorsTop10");
-    state.charts.vendorsTop10 = new Chart(document.getElementById("chartVendorsTop10"), {
-      type: "bar",
-      data: {
-        labels: sorted.map(e => e[0]),
-        datasets: [{ label: metricLabel, data: sorted.map(e => e[1]), backgroundColor: "#222225" }]
-      },
-      options: {
-        indexAxis: "y",
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: { x: { beginAtZero: true, ticks: { precision: 0 } } }
-      }
-    });
-  }
-
-  function renderArticlesChart(rows) {
-    const card = document.getElementById("chartArticlesTop10").closest(".chart-card");
-    const key = state.fieldsPresent.has("itemDescription") ? "itemDescription" : (state.fieldsPresent.has("articleCode") ? "articleCode" : null);
-    if (!key) { card.classList.add("hidden"); return; }
-    card.classList.remove("hidden");
-
-    const map = sumDefectsBy(rows, key);
-    const sorted = Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
-    const metricLabel = state.fieldsPresent.has("defectQuantity") ? "Defect quantity" : "Complaints";
-
-    destroyChart("articlesTop10");
-    state.charts.articlesTop10 = new Chart(document.getElementById("chartArticlesTop10"), {
-      type: "bar",
-      data: {
-        labels: sorted.map(e => e[0]),
-        datasets: [{ label: metricLabel, data: sorted.map(e => e[1]), backgroundColor: "#7A7A80" }]
-      },
-      options: {
-        indexAxis: "y",
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: { x: { beginAtZero: true, ticks: { precision: 0 } } }
-      }
-    });
-  }
-
-  /* ---------------------------------------------------------------------
-     Table
-     ------------------------------------------------------------------- */
-  function getTableColumns() {
-    const cols = TABLE_COLUMN_ORDER.filter(k => state.fieldsPresent.has(k));
-    // append any extra/unmapped headers found across records
-    const extraHeaders = new Set();
-    state.records.forEach(r => Object.keys(r.__extra || {}).forEach(h => extraHeaders.add(h)));
-    return { canonical: cols, extras: Array.from(extraHeaders) };
-  }
-
-  function formatCell(key, value) {
-    if (value === null || value === undefined || String(value).trim() === "") return "";
-    if (key === "dateOfIssue" || key === "manufacturingDate" || key === "closureTarget") {
-      const d = excelSerialToDate(value);
-      if (d) return d.toLocaleDateString("en-GB");
-    }
-    return escapeHtml(String(value));
-  }
-
-  function getCellValue(record, colKey) {
-    if (colKey.startsWith("__extra.")) {
-      const h = colKey.slice("__extra.".length);
-      return record.__extra ? record.__extra[h] : null;
-    }
-    return record[colKey];
-  }
-
-  /* ---------------------------------------------------------------------
-     Orchestration
-     ------------------------------------------------------------------- */
-  function applyFiltersAndRender() {
-    const rows = getFilteredRecords();
-    renderKpis(rows);
-    renderCharts(rows);
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  }
-
-  /* ---------------------------------------------------------------------
-     Auto-load published data (data/quality-data.json) on page open
-     ------------------------------------------------------------------- */
-  async function tryAutoLoadPublishedData() {
-    try {
-      const res = await fetch(DATA_JSON_PATH, { cache: "no-store" });
-      if (!res.ok) return false; // 404 = nothing published yet, that's expected/fine
-      const payload = await res.json();
-      hydrateStateFromPayload(payload);
-      state.dataSource = "published";
-      showLiveBanner(payload.generatedAt, payload.selectedSheets);
-      showDashboard();
-      setStatus("Live published data loaded automatically.", "success");
-      return true;
-    } catch (err) {
-      // No published file yet, or it's not valid JSON - fall back to manual upload silently.
-      return false;
-    }
-  }
-
-  function hydrateStateFromPayload(payload) {
-    state.records = payload.records || [];
-    state.fields = payload.fields || {};
-    state.fieldsPresent = new Set(payload.fieldsPresent || []);
-    state.selectedSheets = payload.selectedSheets || [];
-    state.romMapping = payload.romMapping || {};
-    state.workbook = null;
-    state.sheetNames = [];
-  }
-
-  function showLiveBanner(generatedAt, selectedSheets) {
-    const banner = document.getElementById("liveBanner");
-    const meta = document.getElementById("liveBannerMeta");
-    const when = generatedAt ? new Date(generatedAt).toLocaleString("en-GB") : "unknown time";
-    const sheets = (selectedSheets || []).join(", ") || "unknown sheets";
-    meta.textContent = ` \u2014 published ${when} from: ${sheets}`;
-    banner.classList.remove("hidden");
-    document.getElementById("uploadSection").classList.add("hidden");
-  }
-
-  function hideLiveBanner() {
-    document.getElementById("liveBanner").classList.add("hidden");
-  }
-
-  /* ---------------------------------------------------------------------
-     Upload wiring (click + drag/drop)
-     ------------------------------------------------------------------- */
-  function handleFile(file) {
-    if (!file) return;
-    if (typeof XLSX === "undefined") {
-      setStatus("The Excel-reading library (SheetJS) failed to load from the CDN, so files can't be read. Check your internet connection or ad-blocker and reload the page.", "error");
-      return;
-    }
-    document.getElementById("fileName").textContent = file.name;
-    setStatus("Reading workbook...", null);
-    const reader = new FileReader();
-    reader.onload = e => {
+  function handleWorkbookFile(file) {
+    var reader = new FileReader();
+    reader.onload = function (e) {
       try {
-        loadWorkbookFromArrayBuffer(new Uint8Array(e.target.result));
+        var data = new Uint8Array(e.target.result);
+        var wb = XLSX.read(data, { type: 'array', cellDates: true });
+        var sheetsRows = {};
+        wb.SheetNames.forEach(function (name) { sheetsRows[name] = sheetToRows(wb.Sheets[name]); });
+        pendingWorkbookRows = sheetsRows;
+        renderSheetPicker(sheetsRows);
+        if (els.fileName) els.fileName.textContent = file.name;
+        showStatus('Workbook loaded — pick sheets to include, then click "Load selected sheets".', '');
       } catch (err) {
-        console.error(err);
-        setStatus("Could not read this file: " + (err && err.message ? err.message : "unknown error") + ". Please confirm it is a valid, non-password-protected .xlsx / .xls export.", "error");
+        showStatus('Could not read this file: ' + err.message, 'error');
       }
     };
-    reader.onerror = () => setStatus("Error reading file from disk. Please try again.", "error");
+    reader.onerror = function () { showStatus('Could not read this file.', 'error'); };
     reader.readAsArrayBuffer(file);
   }
 
-  function initUpload() {
-    const dropZone = document.getElementById("dropZone");
-    const fileInput = document.getElementById("fileInput");
-
-    document.getElementById("browseBtn").addEventListener("click", e => { e.stopPropagation(); fileInput.click(); });
-    dropZone.addEventListener("click", () => fileInput.click());
-    fileInput.addEventListener("change", () => handleFile(fileInput.files[0]));
-
-    ["dragenter", "dragover"].forEach(evt =>
-      dropZone.addEventListener(evt, e => { e.preventDefault(); dropZone.classList.add("drag-over"); }));
-    ["dragleave", "drop"].forEach(evt =>
-      dropZone.addEventListener(evt, e => { e.preventDefault(); dropZone.classList.remove("drag-over"); }));
-    dropZone.addEventListener("drop", e => {
-      const file = e.dataTransfer.files[0];
-      handleFile(file);
+  function loadSelectedSheets() {
+    if (!pendingWorkbookRows) return;
+    var checked = Array.prototype.map.call(
+      els.sheetCheckboxes.querySelectorAll('input[type=checkbox]:checked'),
+      function (cb) { return cb.value; }
+    );
+    if (!checked.length) { showStatus('Select at least one sheet to load.', 'error'); return; }
+    var newRecords = [];
+    var newFieldMaps = {};
+    checked.forEach(function (name) {
+      var rows = pendingWorkbookRows[name];
+      var info = analyzeSheet(rows, FIELD_RULES, 10);
+      newFieldMaps[name] = info;
+      var recs = rowsToRecords(rows, info.headerRowIdx, info.fieldMap, name);
+      newRecords = newRecords.concat(recs);
     });
-
-    document.getElementById("loadSheetsBtn").addEventListener("click", loadSelectedSheets);
-    document.getElementById("resetFiltersBtn").addEventListener("click", resetFilters);
-
-    document.getElementById("loadDifferentFileBtn").addEventListener("click", () => {
-      document.getElementById("uploadSection").classList.remove("hidden");
-      document.getElementById("uploadSection").scrollIntoView({ behavior: "smooth", block: "start" });
-    });
+    records = newRecords;
+    fieldMapsBySheet = newFieldMaps;
+    if (romMapping) records = joinRomMapping(records, romMapping);
+    if (articleMap) records = joinArticleMap(records, articleMap);
+    isLiveData = false;
+    els.dashboardContent.classList.remove('hidden');
+    buildFiltersGrid();
+    renderAll();
+    renderColumnMappingTable();
+    renderSessionInfo();
+    showStatus('Loaded ' + records.length.toLocaleString('en-IN') + ' rows from ' + checked.length + ' sheet(s).', 'success');
   }
 
-  function debounce(fn, ms) {
-    let t;
-    return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  /* ---------------------------- ROM & article map uploads ---------------------------- */
+
+  function pickBestSheet(wb, rules) {
+    var best = null;
+    wb.SheetNames.forEach(function (name) {
+      var rows = sheetToRows(wb.Sheets[name]);
+      var info = analyzeSheet(rows, rules, 10);
+      if (!best || info.matchCount > best.matchCount) best = { name: name, rows: rows, matchCount: info.matchCount };
+    });
+    return best;
   }
 
-  /* ---------------------------------------------------------------------
-     ROM & RM mapping (optional second file, admin-only)
-     Small reference lookup: Store Code -> { storeName, rom, rm }. Headers
-     are matched by keyword too (not hardcoded to one exact wording), same
-     philosophy as the main quality-data field detection above.
-     ------------------------------------------------------------------- */
-  function initRomMappingUpload() {
-    const input = document.getElementById("romMappingInput");
-    if (!input) return;
-    input.addEventListener("change", async () => {
-      const file = input.files[0];
-      if (!file) return;
-      const statusEl = document.getElementById("romMappingStatus");
-      if (typeof XLSX === "undefined") {
-        statusEl.textContent = "SheetJS failed to load from the CDN, so this file can't be read.";
-        statusEl.style.color = "var(--hamleys-red)";
-        return;
-      }
-      statusEl.textContent = "Reading mapping file...";
-      statusEl.style.color = "var(--grey-500)";
+  function handleRomMappingFile(file) {
+    var reader = new FileReader();
+    reader.onload = function (e) {
       try {
-        const buf = await file.arrayBuffer();
-        const wb = XLSX.read(new Uint8Array(buf), { type: "array", cellDates: true });
-        const sheetName = wb.SheetNames[0];
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, raw: true, defval: null });
-
-        // Header row isn't always row 1 in this workbook - find the first row that
-        // mentions "store" anywhere, which is where "Store Code" lives.
-        let headerRowIdx = rows.findIndex(r => r && r.some(c => c && /store/i.test(String(c))));
-        if (headerRowIdx === -1) headerRowIdx = 0;
-        const headers = rows[headerRowIdx] || [];
-        const norm = headers.map(h => String(h == null ? "" : h).toLowerCase().trim());
-
-        const colStoreCode = norm.findIndex(h => h.includes("store") && h.includes("code"));
-        const colName = norm.findIndex(h => h === "name" || (h.includes("store") && h.includes("name")));
-        const colRom = norm.findIndex(h => h === "rom");
-        const colRm = norm.findIndex(h => h === "rm");
-
-        if (colStoreCode === -1 || colRom === -1) {
-          statusEl.textContent = "Could not find Store Code / ROM columns in this file. Expected headers like \"Store Code\" and \"ROM\".";
-          statusEl.style.color = "var(--hamleys-red)";
-          return;
+        var data = new Uint8Array(e.target.result);
+        var wb = XLSX.read(data, { type: 'array', cellDates: true });
+        var best = pickBestSheet(wb, ROM_FIELD_RULES);
+        romMapping = buildRomMappingFromRows(best.rows);
+        records = joinRomMapping(records, romMapping);
+        if (els.romMappingStatus) {
+          els.romMappingStatus.textContent = 'Loaded ' + Object.keys(romMapping).length.toLocaleString('en-IN') + ' store mappings from "' + file.name + '".';
         }
-
-        const mapping = {};
-        for (let r = headerRowIdx + 1; r < rows.length; r++) {
-          const row = rows[r];
-          if (!row) continue;
-          const code = row[colStoreCode];
-          if (!code) continue;
-          mapping[String(code).trim().toUpperCase()] = {
-            storeName: colName !== -1 ? row[colName] : null,
-            rom: colRom !== -1 ? row[colRom] : null,
-            rm: colRm !== -1 ? row[colRm] : null
-          };
-        }
-
-        if (Object.keys(mapping).length === 0) {
-          statusEl.textContent = "No mapping rows found under the detected header.";
-          statusEl.style.color = "var(--hamleys-red)";
-          return;
-        }
-
-        state.romMapping = mapping;
-        applyRomMapping();
-        statusEl.textContent = `Loaded mapping for ${Object.keys(mapping).length} stores.`;
-        statusEl.style.color = "var(--success)";
-
-        if (state.records.length > 0) {
-          buildFilters();
-          applyFiltersAndRender();
-        }
+        buildFiltersGrid();
+        renderAll();
+        renderSessionInfo();
       } catch (err) {
-        console.error(err);
-        statusEl.textContent = "Could not read this mapping file: " + (err && err.message ? err.message : "unknown error");
-        statusEl.style.color = "var(--hamleys-red)";
+        if (els.romMappingStatus) els.romMappingStatus.textContent = 'Could not read this file: ' + err.message;
       }
-    });
+    };
+    reader.readAsArrayBuffer(file);
   }
 
-  function applyRomMapping() {
-    if (!state.romMapping || Object.keys(state.romMapping).length === 0) return;
-    let anyRom = false, anyRm = false;
-    state.records.forEach(r => {
-      const code = r.storeCode ? String(r.storeCode).trim().toUpperCase() : null;
-      const m = code ? state.romMapping[code] : null;
-      if (m) {
-        if (m.rom) { r.rom = m.rom; anyRom = true; }
-        if (m.rm) { r.regionalManager = m.rm; anyRm = true; }
+  function handleArticleMapFile(file) {
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      try {
+        var data = new Uint8Array(e.target.result);
+        var wb = XLSX.read(data, { type: 'array', cellDates: true });
+        var best = pickBestSheet(wb, ARTICLE_FIELD_RULES);
+        articleMap = buildArticleMapFromRows(best.rows);
+        records = joinArticleMap(records, articleMap);
+        if (els.articleMapStatus) {
+          els.articleMapStatus.textContent = 'Loaded ' + Object.keys(articleMap.articles).length.toLocaleString('en-IN') + ' article mappings from "' + file.name + '".';
+        }
+        buildFiltersGrid();
+        renderAll();
+        renderSessionInfo();
+      } catch (err) {
+        if (els.articleMapStatus) els.articleMapStatus.textContent = 'Could not read this file: ' + err.message;
       }
-    });
-    if (anyRom) state.fieldsPresent.add("rom");
-    if (anyRm) state.fieldsPresent.add("regionalManager");
+    };
+    reader.readAsArrayBuffer(file);
   }
 
-  /* ---------------------------------------------------------------------
-     Admin panel
-     ------------------------------------------------------------------- */
-  function initAdmin() {
-    const overlay = document.getElementById("adminOverlay");
-    document.getElementById("adminToggleBtn").addEventListener("click", () => {
-      overlay.classList.remove("hidden");
-      document.getElementById("adminLoginView").classList.toggle("hidden", state.isAdmin);
-      document.getElementById("adminToolsView").classList.toggle("hidden", !state.isAdmin);
-      if (state.isAdmin) renderAdminTools();
-    });
-    document.getElementById("adminCloseBtn").addEventListener("click", () => overlay.classList.add("hidden"));
-    overlay.addEventListener("click", e => { if (e.target === overlay) overlay.classList.add("hidden"); });
+  /* ---------------------------- CSV export ---------------------------- */
 
-    document.getElementById("adminLoginBtn").addEventListener("click", () => {
-      const val = document.getElementById("adminPassword").value;
-      if (val === ADMIN_PASSCODE) {
-        state.isAdmin = true;
-        document.getElementById("adminError").textContent = "";
-        document.getElementById("adminLoginView").classList.add("hidden");
-        document.getElementById("adminToolsView").classList.remove("hidden");
-        renderAdminTools();
-      } else {
-        document.getElementById("adminError").textContent = "Incorrect passcode.";
-      }
-    });
-
-    document.getElementById("adminPassword").addEventListener("keydown", e => {
-      if (e.key === "Enter") document.getElementById("adminLoginBtn").click();
-    });
-  }
-
-  function renderAdminTools() {
-    const mapWrap = document.getElementById("columnMappingTable");
-    if (Object.keys(state.fields).length === 0) {
-      mapWrap.innerHTML = "<p class='admin-note'>Load a workbook first to see detected field mapping.</p>";
-    } else {
-      let html = "<table><thead><tr><th>Canonical field</th><th>Sheet</th><th>Original header</th></tr></thead><tbody>";
-      Object.entries(state.fields).forEach(([key, sources]) => {
-        sources.forEach(s => {
-          html += `<tr><td>${escapeHtml(CANONICAL_LABELS[key] || key)}</td><td>${escapeHtml(s.sheet)}</td><td>${escapeHtml(String(s.header))}</td></tr>`;
-        });
-      });
-      html += "</tbody></table>";
-      mapWrap.innerHTML = html;
+  function exportCsv() {
+    var filtered = applyFilters();
+    var cols = TABLE_COLUMNS;
+    function csvEscape(v) {
+      if (v === null || v === undefined) v = '';
+      v = String(v);
+      if (/[",\n]/.test(v)) v = '"' + v.replace(/"/g, '""') + '"';
+      return v;
     }
-
-    const romCount = Object.keys(state.romMapping || {}).length;
-    document.getElementById("sessionInfo").textContent =
-      state.records.length
-        ? `${state.records.length} records loaded from sheet(s): ${state.selectedSheets.join(", ")}. ROM/RM mapping: ${romCount ? romCount + " stores loaded" : "not loaded"}. Nothing persists after refresh.`
-        : "No data loaded yet.";
-
-    document.getElementById("exportCsvBtn").onclick = exportFilteredCsv;
-    document.getElementById("publishBtn").onclick = publishToGithub;
-  }
-
-  function exportFilteredCsv() {
-    const rows = getFilteredRecords();
-    if (rows.length === 0) { alert("No rows to export with current filters."); return; }
-    const { canonical, extras } = getTableColumns();
-    const allCols = canonical.map(k => ({ key: k, label: CANONICAL_LABELS[k] || k }))
-      .concat(extras.map(h => ({ key: "__extra." + h, label: h })));
-
-    const lines = [allCols.map(c => csvEscape(c.label)).join(",")];
-    rows.forEach(r => {
-      const line = allCols.map(c => {
-        const v = getCellValue(r, c.key);
-        const formatted = formatCell(c.key.replace("__extra.", ""), v);
-        return csvEscape(formatted);
-      }).join(",");
-      lines.push(line);
-    });
-
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
+    var header = cols.map(function (c) { return csvEscape(c.label); }).join(',');
+    var lines = filtered.map(function (r) { return cols.map(function (c) { return csvEscape(r[c.key]); }).join(','); });
+    var csv = [header].concat(lines).join('\n');
+    var blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
     a.href = url;
-    a.download = "hamleys_quality_export.csv";
+    a.download = 'quality-dashboard-export-' + new Date().toISOString().slice(0, 10) + '.csv';
+    document.body.appendChild(a);
     a.click();
+    document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }
 
-  /* ---------------------------------------------------------------------
-     Publish to GitHub (Contents API)
-     Commits the full loaded dataset as JSON so every visitor's browser can
-     auto-load it via tryAutoLoadPublishedData() above. The token only ever
-     lives in this tab's JS memory - it is read fresh from the input each
-     click and never written to storage of any kind.
-     ------------------------------------------------------------------- */
-  function utf8ToBase64(str) {
-    const bytes = new TextEncoder().encode(str);
-    let binary = "";
-    const chunkSize = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
-    }
-    return btoa(binary);
-  }
+  /* ---------------------------- GitHub publish ---------------------------- */
 
-  async function publishToGithub() {
-    const token = document.getElementById("ghToken").value.trim();
-    const owner = document.getElementById("ghOwner").value.trim();
-    const repo = document.getElementById("ghRepo").value.trim();
-    const branch = document.getElementById("ghBranch").value.trim() || "main";
-    const path = document.getElementById("ghPath").value.trim() || DATA_JSON_PATH;
-    const statusEl = document.getElementById("publishStatus");
+  function publishToGithub() {
+    var token = (els.ghToken.value || '').trim();
+    var owner = (els.ghOwner.value || '').trim();
+    var repo = (els.ghRepo.value || '').trim();
+    var branch = (els.ghBranch.value || '').trim() || 'main';
+    var filePath = (els.ghPath.value || '').trim() || 'data/quality-data.json';
 
     if (!token || !owner || !repo) {
-      statusEl.textContent = "Fill in the token, repo owner, and repo name first.";
-      statusEl.style.color = "var(--hamleys-red)";
+      els.publishStatus.textContent = 'Please fill in the GitHub token, owner and repository name.';
       return;
     }
-    if (state.records.length === 0) {
-      statusEl.textContent = "Load a workbook first - nothing to publish yet.";
-      statusEl.style.color = "var(--hamleys-red)";
+    if (!records.length) {
+      els.publishStatus.textContent = 'Load some data before publishing.';
       return;
     }
 
-    statusEl.textContent = "Publishing...";
-    statusEl.style.color = "var(--grey-500)";
+    els.publishStatus.textContent = 'Publishing…';
+    els.publishBtn.disabled = true;
 
-    const payload = {
-      generatedAt: new Date().toISOString(),
-      selectedSheets: state.selectedSheets,
-      fields: state.fields,
-      fieldsPresent: Array.from(state.fieldsPresent),
-      romMapping: state.romMapping,
-      records: state.records
-    };
-    const contentBase64 = utf8ToBase64(JSON.stringify(payload));
-    const apiBase = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${path.split("/").map(encodeURIComponent).join("/")}`;
-    const headers = {
-      "Authorization": `Bearer ${token}`,
-      "Accept": "application/vnd.github+json"
+    var payload = {
+      publishedAt: new Date().toISOString(),
+      records: records,
+      romMapping: romMapping || {},
+      articleMap: articleMap || { sections: [], articles: {} }
     };
 
+    var apiUrl = 'https://api.github.com/repos/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) +
+      '/contents/' + filePath.split('/').map(encodeURIComponent).join('/');
+    var headers = { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json' };
+
+    var contentBase64;
     try {
-      // Look up existing file's sha (required by GitHub to update rather than create)
-      let sha;
-      const getRes = await fetch(`${apiBase}?ref=${encodeURIComponent(branch)}`, { headers });
-      if (getRes.ok) {
-        const existing = await getRes.json();
-        sha = existing.sha;
-      } else if (getRes.status !== 404) {
-        const errBody = await getRes.json().catch(() => ({}));
-        throw new Error(errBody.message || `GitHub returned ${getRes.status} while checking for an existing file.`);
-      }
-
-      const putRes = await fetch(apiBase, {
-        method: "PUT",
-        headers: { ...headers, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message: `Publish quality dashboard data (${state.records.length} records) - ${new Date().toISOString()}`,
-          content: contentBase64,
-          branch,
-          ...(sha ? { sha } : {})
-        })
-      });
-
-      if (!putRes.ok) {
-        const errBody = await putRes.json().catch(() => ({}));
-        throw new Error(errBody.message || `GitHub returned ${putRes.status} while publishing.`);
-      }
-
-      const result = await putRes.json();
-      statusEl.innerHTML = `Published successfully. <a href="${result.commit && result.commit.html_url ? result.commit.html_url : "#"}" target="_blank" rel="noopener">View commit</a>. It may take a minute for GitHub Pages to redeploy.`;
-      statusEl.style.color = "var(--success)";
-    } catch (err) {
-      console.error(err);
-      statusEl.textContent = "Publish failed: " + err.message;
-      statusEl.style.color = "var(--hamleys-red)";
-    }
-  }
-
-  function csvEscape(v) {
-    const s = String(v == null ? "" : v);
-    if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
-    return s;
-  }
-
-  /* ---------------------------------------------------------------------
-     Init
-     ------------------------------------------------------------------- */
-  document.addEventListener("DOMContentLoaded", async () => {
-    initUpload();
-    initAdmin();
-    initRomMappingUpload();
-    if (typeof XLSX === "undefined" || typeof Chart === "undefined") {
-      const missing = [typeof XLSX === "undefined" ? "SheetJS (xlsx.js)" : null, typeof Chart === "undefined" ? "Chart.js" : null].filter(Boolean).join(" and ");
-      setStatus(`${missing} failed to load from the CDN. Charts/parsing won't work until this is resolved - check your network connection or ad-blocker, then reload.`, "error");
+      contentBase64 = utf8ToBase64(JSON.stringify(payload));
+    } catch (encErr) {
+      els.publishStatus.textContent = 'Could not encode the dataset: ' + encErr.message;
+      els.publishBtn.disabled = false;
       return;
     }
-    await tryAutoLoadPublishedData();
-  });
-})();
+
+    fetch(apiUrl + '?ref=' + encodeURIComponent(branch), { headers: headers })
+      .then(function (getRes) {
+        if (getRes.status === 200) return getRes.json().then(function (j) { return j.sha; });
+        if (getRes.status === 404) return undefined;
+        return getRes.text().then(function (t) {
+          throw new Error('Could not check existing file (HTTP ' + getRes.status + '): ' + t.slice(0, 200));
+        });
+      })
+      .then(function (sha) {
+        var putBody = { message: 'Publish quality dashboard data', content: contentBase64, branch: branch };
+        if (sha) putBody.sha = sha;
+        var putHeaders = {};
+        for (var k in headers) putHeaders[k] = headers[k];
+        putHeaders['Content-Type'] = 'application/json';
+        return fetch(apiUrl, { method: 'PUT', headers: putHeaders, body: JSON.stringify(putBody) })
+          .then(function (putRes) {
+            return putRes.json().then(function (putJson) {
+              if (!putRes.ok) throw new Error((putJson && putJson.message) || ('HTTP ' + putRes.status));
+              return putJson;
+            });
+          });
+      })
+      .then(function (putJson) {
+        var commitUrl = putJson.commit && putJson.commit.html_url;
+        els.publishStatus.innerHTML = 'Published successfully.' +
+          (commitUrl ? ' <a href="' + commitUrl + '" target="_blank" rel="noopener">View commit</a>' : '') +
+          ' GitHub Pages should update within about a minute.';
+      })
+      .catch(function (err) {
+        els.publishStatus.textContent = 'Publish failed: ' + err.message;
+      })
+      .then(function () {
+        els.publishBtn.disabled = false;
+      });
+  }
+
+  /* ---------------------------- admin panel wiring ---------------------------- */
+
+  function tryAdminLogin() {
+    if (els.adminPassword.value === ADMIN_PASSCODE) {
+      els.adminLoginView.classList.add('hidden');
+      els.adminToolsView.classList.remove('hidden');
+      els.adminError.textContent = '';
+      renderColumnMappingTable();
+      renderSessionInfo();
+    } else {
+      els.adminError.textContent = 'Incorrect passcode.';
+    }
+  }
+
+  function wireAdminEvents() {
+    if (els.adminToggleBtn) {
+      els.adminToggleBtn.addEventListener('click', function () {
+        els.adminOverlay.classList.remove('hidden');
+        els.adminLoginView.classList.remove('hidden');
+        els.adminToolsView.classList.add('hidden');
+        els.adminPassword.value = '';
+        els.adminError.textContent = '';
+      });
+    }
+    if (els.adminCloseBtn) els.adminCloseBtn.addEventListener('click', function () { els.adminOverlay.classList.add('hidden'); });
+    if (els.adminOverlay) {
+      els.adminOverlay.addEventListener('click', function (e) {
+        if (e.target === els.adminOverlay) els.adminOverlay.classList.add('hidden');
+      });
+    }
+    if (els.adminLoginBtn) els.adminLoginBtn.addEventListener('click', tryAdminLogin);
+    if (els.adminPassword) {
+      els.adminPassword.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') tryAdminLogin();
+      });
+    }
+    if (els.romMappingInput) {
+      els.romMappingInput.addEventListener('change', function (e) {
+        if (e.target.files && e.target.files[0]) handleRomMappingFile(e.target.files[0]);
+      });
+    }
+    if (els.articleMapInput) {
+      els.articleMapInput.addEventListener('change', function (e) {
+        if (e.target.files && e.target.files[0]) handleArticleMapFile(e.target.files[0]);
+      });
+    }
+    if (els.exportCsvBtn) els.exportCsvBtn.addEventListener('click', exportCsv);
+    if (els.publishBtn) els.publishBtn.addEventListener('click', publishToGithub);
+  }
+
+  /* ---------------------------- upload wiring ---------------------------- */
+
+  function wireUploadEvents() {
+    if (els.dropZone) els.dropZone.addEventListener('click', function () { els.fileInput.click(); });
+    if (els.browseBtn) {
+      els.browseBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        els.fileInput.click();
+      });
+    }
+    if (els.fileInput) {
+      els.fileInput.addEventListener('change', function (e) {
+        if (e.target.files && e.target.files[0]) handleWorkbookFile(e.target.files[0]);
+      });
+    }
+    if (els.dropZone) {
+      els.dropZone.addEventListener('dragover', function (e) { e.preventDefault(); els.dropZone.classList.add('drag-over'); });
+      ['dragleave', 'drop'].forEach(function (evt) {
+        els.dropZone.addEventListener(evt, function (e) { e.preventDefault(); els.dropZone.classList.remove('drag-over'); });
+      });
+      els.dropZone.addEventListener('drop', function (e) {
+        var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f) handleWorkbookFile(f);
+      });
+    }
+    if (els.loadSheetsBtn) els.loadSheetsBtn.addEventListener('click', loadSelectedSheets);
+    if (els.resetFiltersBtn) {
+      els.resetFiltersBtn.addEventListener('click', function () {
+        filterState = {};
+        buildFiltersGrid();
+        renderAll();
+      });
+    }
+    if (els.loadDifferentFileBtn) {
+      els.loadDifferentFileBtn.addEventListener('click', function () {
+        els.liveBanner.classList.add('hidden');
+        els.uploadSection.classList.remove('hidden');
+        showStatus('Loading a different file only affects this session — the published live data is unchanged.', '');
+      });
+    }
+  }
+
+  /* ---------------------------- initial live-data load ---------------------------- */
+
+  function initLiveData() {
+    return fetch('data/quality-data.json', { cache: 'no-store' })
+      .then(function (res) {
+        if (!res || !res.ok) return null;
+        return res.json();
+      })
+      .then(function (json) {
+        if (!json) return;
+        records = Array.isArray(json.records) ? json.records : [];
+        romMapping = json.romMapping || null;
+        articleMap = json.articleMap || null;
+        records = joinRomMapping(records, romMapping);
+        records = joinArticleMap(records, articleMap);
+        isLiveData = true;
+        publishedMeta = { publishedAt: json.publishedAt, count: records.length };
+        if (els.liveBannerMeta) {
+          els.liveBannerMeta.textContent = 'Published ' + formatDateDisplay(json.publishedAt) + ' • ' + records.length.toLocaleString('en-IN') + ' records';
+        }
+        if (els.liveBanner) els.liveBanner.classList.remove('hidden');
+        if (els.uploadSection) els.uploadSection.classList.add('hidden');
+        if (els.dashboardContent) els.dashboardContent.classList.remove('hidden');
+        buildFiltersGrid();
+        renderAll();
+        renderSessionInfo();
+      })
+      .catch(function () {
+        /* No published data yet (404) or network error — fall back silently
+           to the manual upload flow, which is already the default UI state. */
+      });
+  }
+
+  /* ---------------------------- boot ---------------------------- */
+
+  wireAdminEvents();
+  wireUploadEvents();
+  wireTableEvents();
+  renderSessionInfo();
+  initLiveData();
+}

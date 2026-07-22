@@ -13,13 +13,20 @@ there is no backend, no build step, and no data ever leaves the device.
   matching (e.g. anything with "store" + "code" is treated as the store code field),
   not hardcoded exact names — so the dashboard keeps working even if a future
   month's form re-orders or slightly re-words its columns
-- KPI cards, four charts (status breakdown, complaints by category, monthly trend,
-  top stores/vendors), and a searchable/sortable data table are generated from
-  whatever fields are actually present in the file
-- Date, store, category, status and vendor filters appear automatically when those
+- KPI cards, five charts, and filters are generated from whatever fields are
+  actually present in the file:
+  - Status breakdown (doughnut)
+  - ROM-wise issues reported (bar, descending) — only appears once the ROM & RM
+    mapping is loaded (see below)
+  - Trend over time (line, monthly)
+  - Top 10 vendors by defects reported (horizontal bar)
+  - Top 10 article descriptions by defects reported (horizontal bar)
+- Date, store, ROM, status and vendor filters appear automatically when those
   fields are detected
 - An **Admin** panel (passcode-gated, session-only) shows the detected column
-  mapping for transparency and lets you export the currently filtered rows as CSV
+  mapping for transparency, lets you upload the optional ROM & RM mapping file,
+  export the currently filtered rows as CSV, and publish the full dataset live
+  to GitHub
 
 Everything runs in-session in the browser tab. Refreshing the page clears all
 loaded data — nothing is written to localStorage, cookies, or any server.
@@ -93,6 +100,24 @@ you don't need repeated access.
 **Re-publishing:** running through steps 1–4 again with a newer file simply
 overwrites `data/quality-data.json` with a new commit — there's nothing to
 clean up first.
+
+## ROM & RM mapping (optional, enables the ROM chart)
+
+The "ROM-wise issues reported" chart needs to know which Regional Operations
+Manager (ROM) each store reports to. This isn't in the quality-complaint
+export, so it's loaded from a separate small lookup workbook:
+
+1. In the Admin panel, under **ROM & RM mapping (optional)**, upload a workbook
+   with columns for Store Code, ROM, and (optionally) RM and Store Name — column
+   order doesn't matter, headers are matched by keyword (e.g. anything containing
+   "store" + "code").
+2. It joins onto the loaded complaint records by Store Code immediately, and the
+   ROM chart and ROM filter appear.
+3. If you publish afterward, this mapping is bundled into the published JSON too,
+   so viewers get the ROM breakdown automatically without uploading anything.
+
+If you re-organize ROMs/RMs later, just re-upload an updated mapping file and
+re-publish — same one-time admin step, no code changes needed.
 
 ## Admin passcode
 

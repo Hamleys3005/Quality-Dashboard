@@ -17,9 +17,8 @@
     records: [],          // unified, canonical-field records across sheets
     fields: {},           // canonical field -> detected (originalHeader, sheet) info, for admin view
     fieldsPresent: new Set(), // which canonical fields were actually found anywhere
+    romMapping: {},        // Store Code -> { storeName, rom, rm }, from the optional admin upload
     filters: {},
-    sortKey: null,
-    sortDir: 1,
     charts: {},
     isAdmin: false
   };
@@ -134,12 +133,14 @@
     clusterContact: "Cluster Leader Contact",
     smName: "Store Manager Name",
     smEmail: "Store Manager Email",
-    smNumber: "Store Manager Contact"
+    smNumber: "Store Manager Contact",
+    rom: "ROM",
+    regionalManager: "RM"
   };
 
-  // Preferred column order for the raw table
+  // Preferred column order for CSV export
   const TABLE_COLUMN_ORDER = [
-    "dateOfIssue","storeCode","storeLocation","articleCode","itemDescription",
+    "dateOfIssue","storeCode","storeLocation","rom","regionalManager","articleCode","itemDescription",
     "vendorName","category","issueDescription","defectQuantity","rootCause",
     "containmentAction","status","closureTarget","complaintStage","batchCode",
     "manufacturingDate","smName","smNumber","smEmail","clusterLeader","clusterContact",
@@ -250,6 +251,7 @@
       return;
     }
 
+    applyRomMapping();
     setStatus(`Loaded ${state.records.length} records from ${checked.length} sheet(s).`, "success");
     state.dataSource = "upload";
     hideLiveBanner();
@@ -285,7 +287,7 @@
     grid.innerHTML = "";
     state.filters = {};
 
-    const categoricalCandidates = ["storeCode", "storeLocation", "category", "status", "vendorName", "clusterLeader"];
+    const categoricalCandidates = ["storeCode", "storeLocation", "rom", "status", "vendorName", "clusterLeader"];
     categoricalCandidates.forEach(key => {
       if (!state.fieldsPresent.has(key)) return;
       const values = uniqueValues(key);
@@ -336,13 +338,12 @@
     document.querySelectorAll("#filtersGrid select").forEach(s => s.value = "");
     document.querySelectorAll("#filtersGrid input").forEach(i => i.value = "");
     Object.keys(state.filters).forEach(k => state.filters[k] = "");
-    document.getElementById("tableSearch").value = "";
     applyFiltersAndRender();
   }
 
   function getFilteredRecords() {
     return state.records.filter(r => {
-      for (const key of ["storeCode", "storeLocation", "category", "status", "vendorName", "clusterLeader"]) {
+      for (const key of ["storeCode", "storeLocation", "rom", "status", "vendorName", "clusterLeader"]) {
         const fv = state.filters[key];
         if (fv && String(r[key] || "").trim() !== fv) return false;
       }
@@ -358,11 +359,6 @@
           to.setHours(23, 59, 59, 999);
           if (d > to) return false;
         }
-      }
-      const search = (document.getElementById("tableSearch").value || "").toLowerCase().trim();
-      if (search) {
-        const hay = JSON.stringify(r).toLowerCase();
-        if (!hay.includes(search)) return false;
       }
       return true;
     });
@@ -434,11 +430,31 @@
     return map;
   }
 
+  // Sums Defect Quantity per group when that field is present anywhere in the
+  // dataset (the "defects reported" metric); falls back to a simple complaint
+  // count per group when no defect-quantity column was detected at all.
+  function sumDefectsBy(rows, key) {
+    const hasQty = state.fieldsPresent.has("defectQuantity");
+    const map = new Map();
+    rows.forEach(r => {
+      const v = r[key];
+      const label = (v === null || v === undefined || String(v).trim() === "") ? "(blank)" : String(v).trim();
+      let amount = 1;
+      if (hasQty) {
+        const q = r.defectQuantity;
+        amount = typeof q === "number" ? q : (typeof q === "string" && q.trim() !== "" && !isNaN(Number(q)) ? Number(q) : 0);
+      }
+      map.set(label, (map.get(label) || 0) + amount);
+    });
+    return map;
+  }
+
   function renderCharts(rows) {
     renderStatusChart(rows);
-    renderCategoryChart(rows);
+    renderRomChart(rows);
     renderTrendChart(rows);
-    renderStoresChart(rows);
+    renderVendorsChart(rows);
+    renderArticlesChart(rows);
   }
 
   function renderStatusChart(rows) {
@@ -454,28 +470,6 @@
       type: "doughnut",
       data: { labels, datasets: [{ data, backgroundColor: CHART_COLORS }] },
       options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } } }
-    });
-  }
-
-  function renderCategoryChart(rows) {
-    const card = document.getElementById("chartCategory").closest(".chart-card");
-    if (!state.fieldsPresent.has("category")) { card.classList.add("hidden"); return; }
-    card.classList.remove("hidden");
-    const map = countBy(rows, "category");
-    const sorted = Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 12);
-
-    destroyChart("category");
-    state.charts.category = new Chart(document.getElementById("chartCategory"), {
-      type: "bar",
-      data: {
-        labels: sorted.map(e => e[0]),
-        datasets: [{ label: "Complaints", data: sorted.map(e => e[1]), backgroundColor: "#E3001B" }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
-      }
     });
   }
 
@@ -520,22 +514,80 @@
     });
   }
 
-  function renderStoresChart(rows) {
-    const card = document.getElementById("chartStores").closest(".chart-card");
-    const key = state.fieldsPresent.has("storeCode") ? "storeCode" : (state.fieldsPresent.has("vendorName") ? "vendorName" : null);
-    if (!key) { card.classList.add("hidden"); return; }
+  function renderRomChart(rows) {
+    const card = document.getElementById("chartRom").closest(".chart-card");
+    const emptyMsg = document.getElementById("chartRomEmpty");
+    const canvas = document.getElementById("chartRom");
     card.classList.remove("hidden");
-    document.getElementById("chart4Title").textContent = key === "storeCode" ? "Top stores by complaint count" : "Top vendors by complaint count";
 
-    const map = countBy(rows, key);
-    const sorted = Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 15);
+    if (!state.fieldsPresent.has("rom")) {
+      canvas.classList.add("hidden");
+      emptyMsg.classList.remove("hidden");
+      destroyChart("rom");
+      return;
+    }
+    canvas.classList.remove("hidden");
+    emptyMsg.classList.add("hidden");
 
-    destroyChart("stores");
-    state.charts.stores = new Chart(document.getElementById("chartStores"), {
+    const map = countBy(rows, "rom");
+    const sorted = Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
+
+    destroyChart("rom");
+    state.charts.rom = new Chart(canvas, {
       type: "bar",
       data: {
         labels: sorted.map(e => e[0]),
-        datasets: [{ label: "Complaints", data: sorted.map(e => e[1]), backgroundColor: "#222225" }]
+        datasets: [{ label: "Issues reported", data: sorted.map(e => e[1]), backgroundColor: "#E3001B" }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
+      }
+    });
+  }
+
+  function renderVendorsChart(rows) {
+    const card = document.getElementById("chartVendorsTop10").closest(".chart-card");
+    if (!state.fieldsPresent.has("vendorName")) { card.classList.add("hidden"); return; }
+    card.classList.remove("hidden");
+
+    const map = sumDefectsBy(rows, "vendorName");
+    const sorted = Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    const metricLabel = state.fieldsPresent.has("defectQuantity") ? "Defect quantity" : "Complaints";
+
+    destroyChart("vendorsTop10");
+    state.charts.vendorsTop10 = new Chart(document.getElementById("chartVendorsTop10"), {
+      type: "bar",
+      data: {
+        labels: sorted.map(e => e[0]),
+        datasets: [{ label: metricLabel, data: sorted.map(e => e[1]), backgroundColor: "#222225" }]
+      },
+      options: {
+        indexAxis: "y",
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { x: { beginAtZero: true, ticks: { precision: 0 } } }
+      }
+    });
+  }
+
+  function renderArticlesChart(rows) {
+    const card = document.getElementById("chartArticlesTop10").closest(".chart-card");
+    const key = state.fieldsPresent.has("itemDescription") ? "itemDescription" : (state.fieldsPresent.has("articleCode") ? "articleCode" : null);
+    if (!key) { card.classList.add("hidden"); return; }
+    card.classList.remove("hidden");
+
+    const map = sumDefectsBy(rows, key);
+    const sorted = Array.from(map.entries()).sort((a, b) => b[1] - a[1]).slice(0, 10);
+    const metricLabel = state.fieldsPresent.has("defectQuantity") ? "Defect quantity" : "Complaints";
+
+    destroyChart("articlesTop10");
+    state.charts.articlesTop10 = new Chart(document.getElementById("chartArticlesTop10"), {
+      type: "bar",
+      data: {
+        labels: sorted.map(e => e[0]),
+        datasets: [{ label: metricLabel, data: sorted.map(e => e[1]), backgroundColor: "#7A7A80" }]
       },
       options: {
         indexAxis: "y",
@@ -566,65 +618,6 @@
     return escapeHtml(String(value));
   }
 
-  function renderTable(rows) {
-    const { canonical, extras } = getTableColumns();
-    const headRow = document.getElementById("tableHeadRow");
-    headRow.innerHTML = "";
-
-    const allCols = canonical.map(k => ({ key: k, label: CANONICAL_LABELS[k] || k, extra: false }))
-      .concat(extras.map(h => ({ key: "__extra." + h, label: h, extra: true })));
-
-    allCols.forEach(col => {
-      const th = document.createElement("th");
-      let arrow = "";
-      if (state.sortKey === col.key) arrow = `<span class="sort-arrow">${state.sortDir === 1 ? "▲" : "▼"}</span>`;
-      th.innerHTML = `${escapeHtml(col.label)}${arrow}`;
-      th.addEventListener("click", () => {
-        if (state.sortKey === col.key) state.sortDir *= -1;
-        else { state.sortKey = col.key; state.sortDir = 1; }
-        applyFiltersAndRender();
-      });
-      headRow.appendChild(th);
-    });
-
-    let sortedRows = rows.slice();
-    if (state.sortKey) {
-      sortedRows.sort((a, b) => {
-        const va = getCellValue(a, state.sortKey);
-        const vb = getCellValue(b, state.sortKey);
-        if (va === vb) return 0;
-        if (va === null || va === undefined || va === "") return 1;
-        if (vb === null || vb === undefined || vb === "") return -1;
-        if (typeof va === "number" && typeof vb === "number") return (va - vb) * state.sortDir;
-        return String(va).localeCompare(String(vb)) * state.sortDir;
-      });
-    }
-
-    const body = document.getElementById("tableBody");
-    body.innerHTML = "";
-    const maxRender = 1000; // keep the DOM responsive on very large filtered sets
-    sortedRows.slice(0, maxRender).forEach(r => {
-      const tr = document.createElement("tr");
-      allCols.forEach(col => {
-        const td = document.createElement("td");
-        const raw = getCellValue(r, col.key);
-        if (col.key === "status" && raw) {
-          const cls = /closed/i.test(raw) ? "status-closed" : /wip|open|pending/i.test(raw) ? "status-wip" : "status-other";
-          td.innerHTML = `<span class="status-pill ${cls}">${escapeHtml(String(raw))}</span>`;
-        } else {
-          td.textContent = formatCell(col.key.replace("__extra.", ""), raw);
-        }
-        tr.appendChild(td);
-      });
-      body.appendChild(tr);
-    });
-
-    const countLabel = sortedRows.length > maxRender
-      ? `Showing ${maxRender} of ${sortedRows.length} rows (refine filters to see more)`
-      : `${sortedRows.length} row(s)`;
-    document.getElementById("rowCount").textContent = countLabel;
-  }
-
   function getCellValue(record, colKey) {
     if (colKey.startsWith("__extra.")) {
       const h = colKey.slice("__extra.".length);
@@ -640,7 +633,6 @@
     const rows = getFilteredRecords();
     renderKpis(rows);
     renderCharts(rows);
-    renderTable(rows);
   }
 
   function escapeHtml(s) {
@@ -672,6 +664,7 @@
     state.fields = payload.fields || {};
     state.fieldsPresent = new Set(payload.fieldsPresent || []);
     state.selectedSheets = payload.selectedSheets || [];
+    state.romMapping = payload.romMapping || {};
     state.workbook = null;
     state.sheetNames = [];
   }
@@ -733,7 +726,6 @@
 
     document.getElementById("loadSheetsBtn").addEventListener("click", loadSelectedSheets);
     document.getElementById("resetFiltersBtn").addEventListener("click", resetFilters);
-    document.getElementById("tableSearch").addEventListener("input", debounce(applyFiltersAndRender, 200));
 
     document.getElementById("loadDifferentFileBtn").addEventListener("click", () => {
       document.getElementById("uploadSection").classList.remove("hidden");
@@ -744,6 +736,101 @@
   function debounce(fn, ms) {
     let t;
     return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+  }
+
+  /* ---------------------------------------------------------------------
+     ROM & RM mapping (optional second file, admin-only)
+     Small reference lookup: Store Code -> { storeName, rom, rm }. Headers
+     are matched by keyword too (not hardcoded to one exact wording), same
+     philosophy as the main quality-data field detection above.
+     ------------------------------------------------------------------- */
+  function initRomMappingUpload() {
+    const input = document.getElementById("romMappingInput");
+    if (!input) return;
+    input.addEventListener("change", async () => {
+      const file = input.files[0];
+      if (!file) return;
+      const statusEl = document.getElementById("romMappingStatus");
+      if (typeof XLSX === "undefined") {
+        statusEl.textContent = "SheetJS failed to load from the CDN, so this file can't be read.";
+        statusEl.style.color = "var(--hamleys-red)";
+        return;
+      }
+      statusEl.textContent = "Reading mapping file...";
+      statusEl.style.color = "var(--grey-500)";
+      try {
+        const buf = await file.arrayBuffer();
+        const wb = XLSX.read(new Uint8Array(buf), { type: "array", cellDates: true });
+        const sheetName = wb.SheetNames[0];
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, raw: true, defval: null });
+
+        // Header row isn't always row 1 in this workbook - find the first row that
+        // mentions "store" anywhere, which is where "Store Code" lives.
+        let headerRowIdx = rows.findIndex(r => r && r.some(c => c && /store/i.test(String(c))));
+        if (headerRowIdx === -1) headerRowIdx = 0;
+        const headers = rows[headerRowIdx] || [];
+        const norm = headers.map(h => String(h == null ? "" : h).toLowerCase().trim());
+
+        const colStoreCode = norm.findIndex(h => h.includes("store") && h.includes("code"));
+        const colName = norm.findIndex(h => h === "name" || (h.includes("store") && h.includes("name")));
+        const colRom = norm.findIndex(h => h === "rom");
+        const colRm = norm.findIndex(h => h === "rm");
+
+        if (colStoreCode === -1 || colRom === -1) {
+          statusEl.textContent = "Could not find Store Code / ROM columns in this file. Expected headers like \"Store Code\" and \"ROM\".";
+          statusEl.style.color = "var(--hamleys-red)";
+          return;
+        }
+
+        const mapping = {};
+        for (let r = headerRowIdx + 1; r < rows.length; r++) {
+          const row = rows[r];
+          if (!row) continue;
+          const code = row[colStoreCode];
+          if (!code) continue;
+          mapping[String(code).trim().toUpperCase()] = {
+            storeName: colName !== -1 ? row[colName] : null,
+            rom: colRom !== -1 ? row[colRom] : null,
+            rm: colRm !== -1 ? row[colRm] : null
+          };
+        }
+
+        if (Object.keys(mapping).length === 0) {
+          statusEl.textContent = "No mapping rows found under the detected header.";
+          statusEl.style.color = "var(--hamleys-red)";
+          return;
+        }
+
+        state.romMapping = mapping;
+        applyRomMapping();
+        statusEl.textContent = `Loaded mapping for ${Object.keys(mapping).length} stores.`;
+        statusEl.style.color = "var(--success)";
+
+        if (state.records.length > 0) {
+          buildFilters();
+          applyFiltersAndRender();
+        }
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Could not read this mapping file: " + (err && err.message ? err.message : "unknown error");
+        statusEl.style.color = "var(--hamleys-red)";
+      }
+    });
+  }
+
+  function applyRomMapping() {
+    if (!state.romMapping || Object.keys(state.romMapping).length === 0) return;
+    let anyRom = false, anyRm = false;
+    state.records.forEach(r => {
+      const code = r.storeCode ? String(r.storeCode).trim().toUpperCase() : null;
+      const m = code ? state.romMapping[code] : null;
+      if (m) {
+        if (m.rom) { r.rom = m.rom; anyRom = true; }
+        if (m.rm) { r.regionalManager = m.rm; anyRm = true; }
+      }
+    });
+    if (anyRom) state.fieldsPresent.add("rom");
+    if (anyRm) state.fieldsPresent.add("regionalManager");
   }
 
   /* ---------------------------------------------------------------------
@@ -793,9 +880,10 @@
       mapWrap.innerHTML = html;
     }
 
+    const romCount = Object.keys(state.romMapping || {}).length;
     document.getElementById("sessionInfo").textContent =
       state.records.length
-        ? `${state.records.length} records loaded from sheet(s): ${state.selectedSheets.join(", ")}. Nothing persists after refresh.`
+        ? `${state.records.length} records loaded from sheet(s): ${state.selectedSheets.join(", ")}. ROM/RM mapping: ${romCount ? romCount + " stores loaded" : "not loaded"}. Nothing persists after refresh.`
         : "No data loaded yet.";
 
     document.getElementById("exportCsvBtn").onclick = exportFilteredCsv;
@@ -872,6 +960,7 @@
       selectedSheets: state.selectedSheets,
       fields: state.fields,
       fieldsPresent: Array.from(state.fieldsPresent),
+      romMapping: state.romMapping,
       records: state.records
     };
     const contentBase64 = utf8ToBase64(JSON.stringify(payload));
@@ -931,6 +1020,7 @@
   document.addEventListener("DOMContentLoaded", async () => {
     initUpload();
     initAdmin();
+    initRomMappingUpload();
     if (typeof XLSX === "undefined" || typeof Chart === "undefined") {
       const missing = [typeof XLSX === "undefined" ? "SheetJS (xlsx.js)" : null, typeof Chart === "undefined" ? "Chart.js" : null].filter(Boolean).join(" and ");
       setStatus(`${missing} failed to load from the CDN. Charts/parsing won't work until this is resolved - check your network connection or ad-blocker, then reload.`, "error");

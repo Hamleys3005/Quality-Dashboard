@@ -530,6 +530,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
   var CHART_COLORS = ['#E3001B', '#222225', '#7A7A80', '#1E8E4E', '#C77700', '#4A4A4E', '#B50014', '#D6D6DA'];
 
+  if (typeof Chart !== 'undefined' && typeof ChartDataLabels !== 'undefined') {
+    Chart.register(ChartDataLabels);
+  }
+
   function byId(id) { return document.getElementById(id); }
 
   var els = {
@@ -723,7 +727,22 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     return {
       type: 'bar',
       data: { labels: entries.map(function (e) { return e[0]; }), datasets: [{ label: label, data: entries.map(function (e) { return e[1]; }), backgroundColor: color }] },
-      options: { indexAxis: 'y', plugins: { legend: { display: false } }, scales: { x: { beginAtZero: true } } }
+      options: {
+        indexAxis: 'y',
+        layout: { padding: { right: 36 } },
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end',
+            align: 'end',
+            clamp: true,
+            color: '#222225',
+            font: { weight: '700', size: 11 },
+            formatter: function (value) { return value.toLocaleString('en-IN'); }
+          }
+        },
+        scales: { x: { beginAtZero: true, grace: '12%' } }
+      }
     };
   }
 
@@ -732,7 +751,16 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     renderChart('chartStatus', {
       type: 'doughnut',
       data: { labels: statusEntries.map(function (e) { return e[0]; }), datasets: [{ data: statusEntries.map(function (e) { return e[1]; }), backgroundColor: CHART_COLORS }] },
-      options: { plugins: { legend: { position: 'bottom' } } }
+      options: {
+        plugins: {
+          legend: { position: 'bottom' },
+          datalabels: {
+            color: '#fff',
+            font: { weight: '700', size: 12 },
+            formatter: function (value) { return value ? value.toLocaleString('en-IN') : ''; }
+          }
+        }
+      }
     });
 
     var hasRom = records.some(function (r) { return !!r.rom; });
@@ -743,7 +771,21 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       renderChart('chartRom', {
         type: 'bar',
         data: { labels: romEntries.map(function (e) { return e[0]; }), datasets: [{ label: 'Defect qty', data: romEntries.map(function (e) { return e[1]; }), backgroundColor: '#E3001B' }] },
-        options: { plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } }
+        options: {
+          layout: { padding: { top: 24 } },
+          plugins: {
+            legend: { display: false },
+            datalabels: {
+              anchor: 'end',
+              align: 'end',
+              clamp: true,
+              color: '#222225',
+              font: { weight: '700', size: 11 },
+              formatter: function (value) { return value.toLocaleString('en-IN'); }
+            }
+          },
+          scales: { y: { beginAtZero: true, grace: '12%' } }
+        }
       });
     } else {
       destroyChart('chartRom');
@@ -760,7 +802,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     renderChart('chartTrend', {
       type: 'line',
       data: { labels: trendKeys, datasets: [{ label: 'Complaints', data: trendKeys.map(function (k) { return trendMap[k]; }), borderColor: '#E3001B', backgroundColor: 'rgba(227,0,27,0.15)', fill: true, tension: 0.25 }] },
-      options: { plugins: { legend: { display: false } } }
+      options: { plugins: { legend: { display: false }, datalabels: { display: false } } }
     });
 
     var vendorEntries = topN(groupSum(filtered, function (r) { return r.vendorName; }, function (r) { return r.defectQty || 0; }), 10);

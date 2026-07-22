@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Hamleys Quality Dashboard</title>
+<link rel="stylesheet" href="style.css" />
+
+<!-- SheetJS (Excel parsing) -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"
+        integrity="sha256-yVBhl8r4CaB1tt7h2g02+xnacVj/6KiOewyWxdhiPJk="
+        crossorigin="anonymous"></script>
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"
+        integrity="sha256-s4B2di9zY7yekStouOA0gmeY213ya7YfAA7C56MTe8c="
+        crossorigin="anonymous"></script>
+</head>
+<body>
+
+<header class="app-header">
+  <div class="header-inner">
+    <div class="brand">
+      <span class="brand-mark">H</span>
+      <div class="brand-text">
+        <h1>Hamleys Quality Dashboard</h1>
+        <p>Live store quality complaint tracking &amp; analysis</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button id="adminToggleBtn" class="btn btn-ghost" title="Admin tools">Admin</button>
+    </div>
+  </div>
+</header>
+
+<main class="container">
+
+  <!-- Shown when data was auto-loaded from the published GitHub file -->
+  <section class="card live-banner hidden" id="liveBanner">
+    <div class="live-banner-inner">
+      <span class="live-dot"></span>
+      <div>
+        <strong>Live dashboard data loaded</strong>
+        <span id="liveBannerMeta" class="live-banner-meta"></span>
+      </div>
+      <button class="btn btn-ghost" id="loadDifferentFileBtn">Load a different file for this session</button>
+    </div>
+  </section>
+
+  <!-- Upload / How to use -->
+  <section class="card upload-card" id="uploadSection">
+    <div class="upload-grid">
+      <div class="upload-zone" id="dropZone">
+        <input type="file" id="fileInput" accept=".xlsx,.xls" hidden />
+        <div class="upload-icon">&#128193;</div>
+        <p class="upload-title">Drop the latest Excel export here, or click to browse</p>
+        <p class="upload-sub">.xlsx / .xls files only &middot; processed entirely in your browser</p>
+        <button class="btn btn-primary" id="browseBtn">Choose file</button>
+        <p id="fileName" class="file-name"></p>
+      </div>
+
+      <div class="howto">
+        <h3>How to use</h3>
+        <ol>
+          <li>Export / download the latest MS Forms quality response file as <strong>.xlsx</strong>.</li>
+          <li>Drag it into the box on the left, or click "Choose file".</li>
+          <li>If the workbook has multiple sheets, tick the sheet(s) you want to include (monthly complaint logs are pre-selected).</li>
+          <li>Use the filters to narrow by date, store, status or vendor.</li>
+          <li>Nothing is uploaded anywhere &mdash; it all stays on this device for this session, unless an admin explicitly publishes it.</li>
+        </ol>
+      </div>
+    </div>
+
+    <div id="sheetPicker" class="sheet-picker hidden">
+      <h4>Sheets detected in this workbook</h4>
+      <div id="sheetCheckboxes" class="sheet-checkboxes"></div>
+      <button class="btn btn-primary" id="loadSheetsBtn">Load selected sheets</button>
+    </div>
+
+    <p id="statusMsg" class="status-msg"></p>
+  </section>
+
+  <!-- Dashboard content (hidden until data loaded) -->
+  <div id="dashboardContent" class="hidden">
+
+    <!-- Filters -->
+    <section class="card filters-card">
+      <h3>Filters</h3>
+      <div class="filters-grid" id="filtersGrid"></div>
+      <button class="btn btn-ghost" id="resetFiltersBtn">Reset filters</button>
+    </section>
+
+    <!-- KPIs -->
+    <section class="kpi-grid" id="kpiGrid"></section>
+
+    <!-- Charts -->
+    <section class="charts-grid" id="chartsGrid">
+      <div class="card chart-card">
+        <h3>Status breakdown</h3>
+        <div class="chart-wrap"><canvas id="chartStatus"></canvas></div>
+      </div>
+      <div class="card chart-card">
+        <h3>ROM-wise issues reported</h3>
+        <div class="chart-wrap">
+          <canvas id="chartRom"></canvas>
+          <p id="chartRomEmpty" class="chart-empty hidden">Upload the ROM &amp; RM mapping file in the Admin panel to enable this chart.</p>
+        </div>
+      </div>
+      <div class="card chart-card chart-wide">
+        <h3>Trend over time</h3>
+        <div class="chart-wrap"><canvas id="chartTrend"></canvas></div>
+      </div>
+      <div class="card chart-card chart-wide">
+        <h3>Top 10 vendors by defects reported</h3>
+        <div class="chart-wrap"><canvas id="chartVendorsTop10"></canvas></div>
+      </div>
+      <div class="card chart-card chart-wide">
+        <h3>Top 10 article descriptions by defects reported</h3>
+        <div class="chart-wrap"><canvas id="chartArticlesTop10"></canvas></div>
+      </div>
+      <div class="card chart-card chart-wide">
+        <h3>Top 10 sections by defects reported</h3>
+        <div class="chart-wrap">
+          <canvas id="chartSectionsTop10"></canvas>
+          <p id="chartSectionsEmpty" class="chart-empty hidden">Upload the Article Section &amp; MAP mapping file in the Admin panel to enable this chart.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Data table -->
+    <section class="card" id="tableSection">
+      <h3>Complaint records</h3>
+      <div class="table-toolbar">
+        <input type="text" id="tableSearch" placeholder="Search records&hellip;" />
+        <div class="table-toolbar-actions">
+          <span id="rowCount" class="row-count"></span>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table id="dataTable">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+  </div>
+
+</main>
+
+<!-- Admin panel (hidden, password-gated, session only) -->
+<div id="adminOverlay" class="admin-overlay hidden">
+  <div class="admin-panel">
+    <button class="admin-close" id="adminCloseBtn">&times;</button>
+
+    <div id="adminLoginView">
+      <h3>Admin access</h3>
+      <p class="admin-note">Session-only. No credentials are stored, transmitted, or saved anywhere &mdash; this simply hides advanced tools from store staff by default.</p>
+      <input type="password" id="adminPassword" placeholder="Admin passcode" />
+      <button class="btn btn-primary" id="adminLoginBtn">Unlock</button>
+      <p id="adminError" class="admin-error"></p>
+    </div>
+
+    <div id="adminToolsView" class="hidden">
+      <h3>Admin tools</h3>
+
+      <div class="admin-block">
+        <h4>Detected column mapping</h4>
+        <p class="admin-note">Columns are auto-matched from row 1 of each sheet using pattern rules (not fixed names), so wording can drift release to release. Review the mapping below.</p>
+        <div id="columnMappingTable"></div>
+      </div>
+
+      <div class="admin-block">
+        <h4>ROM &amp; RM mapping (optional)</h4>
+        <p class="admin-note">
+          Upload the Store Code &rarr; ROM/RM lookup workbook to enable the "ROM-wise
+          issues reported" chart and the ROM filter. It joins onto the loaded complaint
+          data by Store Code and is included automatically when you publish.
+        </p>
+        <input type="file" id="romMappingInput" accept=".xlsx,.xls" />
+        <p id="romMappingStatus" class="admin-note"></p>
+      </div>
+
+      <div class="admin-block">
+        <h4>Article Section &amp; MAP mapping (optional)</h4>
+        <p class="admin-note">
+          Upload the Article Code &rarr; Section/MAP lookup workbook to enable the
+          "Top 10 sections by defects reported" chart, the Section filter, and the
+          "Estimated MAP Value Impact" KPI. It joins onto the loaded complaint data
+          by Article Code and is included automatically when you publish.
+        </p>
+        <input type="file" id="articleMapInput" accept=".xlsb,.xlsx,.xls" />
+        <p id="articleMapStatus" class="admin-note"></p>
+      </div>
+
+      <div class="admin-block">
+        <h4>Export</h4>
+        <button class="btn btn-primary" id="exportCsvBtn">Export filtered data as CSV</button>
+      </div>
+
+      <div class="admin-block">
+        <h4>Publish live data to GitHub</h4>
+        <p class="admin-note">
+          Publishes the full loaded dataset (not just the current filter) as a JSON file
+          committed straight to your repo, so regular viewers see it automatically on page
+          load with no upload step. Requires a GitHub personal access token with write
+          access to this repository's contents &mdash; use a fine-grained token scoped to
+          only this repo. The token stays in this browser tab's memory only: it is never
+          saved, logged, or sent anywhere except directly to api.github.com, and it is
+          gone the moment you refresh or close the tab.
+        </p>
+        <div class="publish-grid">
+          <div class="filter-field">
+            <label for="ghToken">GitHub token</label>
+            <input type="password" id="ghToken" placeholder="ghp_... or fine-grained token" />
+          </div>
+          <div class="filter-field">
+            <label for="ghOwner">Repo owner / org</label>
+            <input type="text" id="ghOwner" placeholder="e.g. hamleys-india" value="hamleys3005" />
+          </div>
+          <div class="filter-field">
+            <label for="ghRepo">Repository name</label>
+            <input type="text" id="ghRepo" placeholder="e.g. hamleys-quality-dashboard" value="Quality-Dashboard" />
+          </div>
+          <div class="filter-field">
+            <label for="ghBranch">Branch</label>
+            <input type="text" id="ghBranch" value="main" />
+          </div>
+          <div class="filter-field publish-grid-wide">
+            <label for="ghPath">File path in repo</label>
+            <input type="text" id="ghPath" value="data/quality-data.json" />
+          </div>
+        </div>
+        <button class="btn btn-primary" id="publishBtn">Publish current dataset</button>
+        <p id="publishStatus" class="admin-note"></p>
+      </div>
+
+      <div class="admin-block">
+        <h4>Session info</h4>
+        <div id="sessionInfo" class="admin-note"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

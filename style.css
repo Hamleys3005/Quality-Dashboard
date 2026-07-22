@@ -191,6 +191,36 @@ body {
   border: 1px solid var(--grey-300);
   font-size: 13.5px;
   background: var(--white);
+  box-sizing: border-box;
+}
+
+/* Date range filter: needs its own wider slot so the two native date
+   pickers don't overflow into the neighbouring filter column. */
+.filter-daterange {
+  grid-column: span 2;
+  min-width: 0;
+}
+@media (max-width: 640px) {
+  .filter-daterange { grid-column: span 1; }
+}
+.daterange-inputs {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+.daterange-input {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.daterange-tag {
+  display: block;
+  font-size: 10.5px;
+  color: var(--grey-500);
+  margin-bottom: 3px;
+}
+.daterange-input input[type="date"] {
+  width: 100%;
+  min-width: 0;
 }
 
 /* KPI cards */

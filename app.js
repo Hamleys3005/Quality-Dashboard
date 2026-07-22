@@ -616,10 +616,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       if (def.type === 'daterange') {
         var from = filterState[def.key + 'From'] || '';
         var to = filterState[def.key + 'To'] || '';
-        return '<div class="filter-field"><label>' + escapeHtml(def.label) + '</label>' +
-          '<div style="display:flex; gap:6px;">' +
-          '<input type="date" data-filter="' + def.key + 'From" value="' + escapeHtml(from) + '" />' +
-          '<input type="date" data-filter="' + def.key + 'To" value="' + escapeHtml(to) + '" />' +
+        return '<div class="filter-field filter-daterange"><label>' + escapeHtml(def.label) + '</label>' +
+          '<div class="daterange-inputs">' +
+          '<div class="daterange-input"><span class="daterange-tag">From</span><input type="date" data-filter="' + def.key + 'From" value="' + escapeHtml(from) + '" /></div>' +
+          '<div class="daterange-input"><span class="daterange-tag">To</span><input type="date" data-filter="' + def.key + 'To" value="' + escapeHtml(to) + '" /></div>' +
           '</div></div>';
       }
       var seen = {};
@@ -1248,7 +1248,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         renderSessionInfo();
       })
       .catch(function () {
-        /* No published data yet (404) or network error — fall back silently
+        /* No published data yet (404) or network error, fall back silently
            to the manual upload flow, which is already the default UI state. */
       });
   }

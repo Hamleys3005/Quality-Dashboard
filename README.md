@@ -9,26 +9,24 @@ Live at: https://hamleys3005.github.io/Quality-Dashboard/
 
 **KPIs**
 - Total Complaints (count)
-- Open / WIP (**%** of total)
-- Closed (**%** of total)
 - Total Defect Quantity
 - Stores Affected
-- Estimated MAP Value Impact (₹) — shown once the Article Section & MAP mapping is loaded
+- Estimated MAP Value Impact (**₹ in lacs, 1 decimal** — e.g. ₹12.3 L) — shown once the Article Section & MAP mapping is loaded
 
 **Charts**
-- Status breakdown (doughnut)
+- Status breakdown (doughnut) — **shows % of total**, not raw count (hover for exact count)
 - ROM-wise issues reported — needs ROM & RM mapping uploaded in Admin
-- Trend over time (complaint count, monthly)
 - Top 10 vendors by defects reported — vendor names abbreviated on the axis for readability, full name on hover
 - Top 10 article descriptions by defects reported
 - Top 10 sections by defects reported — section names abbreviated on the axis, full name on hover; needs Article Section & MAP mapping
-- **Month-wise quality defects — Hamleys level**: total defect quantity per calendar month across the whole filtered dataset
-- **Month-wise value of defects (₹)**: total MAP value impact per calendar month — needs Article Section & MAP mapping
+- Month-wise quality defects — Hamleys level: total defect quantity per calendar month across the whole filtered dataset
+- Month-wise value of defects (₹ in lacs): total MAP value impact per calendar month — needs Article Section & MAP mapping
+- Top 10 vendors by MAP value (₹ in lacs) — needs Article Section & MAP mapping
 
 **Filters**
-Date range, Store, ROM, Status, Vendor, Section, **Article Code**, **Item Description**.
+**Search** (free text across store, vendor, item description, article code, category, section, ROM/RM, status), Date range, Store, ROM, Status, Vendor, Section, Article Code, Item Description.
 
-There is no raw complaint-records table in this build — it was removed by request.
+There is no raw complaint-records table or "Trend over time" chart in this build — both were removed by request.
 Use **Export filtered data as CSV** in the Admin panel if you need row-level data.
 
 ## Files

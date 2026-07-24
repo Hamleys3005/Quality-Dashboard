@@ -390,6 +390,12 @@ function formatINR(n) {
   return '₹' + rounded.toLocaleString('en-IN');
 }
 
+/* Format a rupee amount in lacs (1 lac = 100,000), 1 decimal place. */
+function formatLacs(n) {
+  var lacs = (n || 0) / 100000;
+  return '₹' + lacs.toFixed(1) + ' L';
+}
+
 /* Classify a status string into one of style.css's known status-pill
    classes for consistent table rendering. */
 function statusPillClass(status) {
@@ -429,7 +435,7 @@ function computeKpis(records) {
     storesAffected: storeCount,
     hasMapImpact: hasMapImpact,
     mapImpactTotal: mapImpactTotal,
-    mapImpactFormatted: formatINR(mapImpactTotal)
+    mapImpactFormatted: formatLacs(mapImpactTotal)
   };
 }
 
@@ -479,6 +485,7 @@ if (typeof module !== 'undefined' && module.exports) {
     joinRomMapping: joinRomMapping,
     joinArticleMap: joinArticleMap,
     formatINR: formatINR,
+    formatLacs: formatLacs,
     statusPillClass: statusPillClass,
     computeKpis: computeKpis,
     utf8ToBase64: utf8ToBase64
@@ -500,7 +507,10 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   var filterState = {};
   var chartInstances = {};
 
+  var SEARCH_FIELDS = ['storeCode', 'storeLocation', 'vendorName', 'itemDescription', 'articleCode', 'issueDescription', 'category', 'section', 'rom', 'rm', 'status'];
+
   var FILTER_DEFS = [
+    { key: 'search', label: 'Search', type: 'text' },
     { key: 'date', label: 'Date range', type: 'daterange' },
     { key: 'storeCode', label: 'Store', type: 'select' },
     { key: 'rom', label: 'ROM', type: 'select' },
@@ -557,6 +567,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     chartRomEmpty: byId('chartRomEmpty'),
     chartSectionsEmpty: byId('chartSectionsEmpty'),
     chartValueMonthlyEmpty: byId('chartValueMonthlyEmpty'),
+    chartVendorsMapValueEmpty: byId('chartVendorsMapValueEmpty'),
     adminOverlay: byId('adminOverlay'),
     adminCloseBtn: byId('adminCloseBtn'),
     adminLoginView: byId('adminLoginView'),
@@ -613,8 +624,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
   function buildFiltersGrid() {
     if (!els.filtersGrid) return;
-    var active = FILTER_DEFS.filter(function (def) { return fieldHasValues(def.key); });
+    var active = FILTER_DEFS.filter(function (def) { return def.type === 'text' || fieldHasValues(def.key); });
     var html = active.map(function (def) {
+      if (def.type === 'text') {
+        var searchVal = filterState[def.key] || '';
+        return '<div class="filter-field"><label>' + escapeHtml(def.label) + '</label>' +
+          '<input type="text" data-filter="' + def.key + '" placeholder="Search store, vendor, item, article&hellip;" value="' + escapeHtml(searchVal) + '" /></div>';
+      }
       if (def.type === 'daterange') {
         var from = filterState[def.key + 'From'] || '';
         var to = filterState[def.key + 'To'] || '';
@@ -644,7 +660,13 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         '</select></div>';
     }).join('');
     els.filtersGrid.innerHTML = html;
-    Array.prototype.forEach.call(els.filtersGrid.querySelectorAll('[data-filter]'), function (el) {
+    Array.prototype.forEach.call(els.filtersGrid.querySelectorAll('input[type=text][data-filter]'), function (el) {
+      el.addEventListener('input', function (e) {
+        filterState[e.target.getAttribute('data-filter')] = e.target.value;
+        renderAll();
+      });
+    });
+    Array.prototype.forEach.call(els.filtersGrid.querySelectorAll('select[data-filter], input[type=date][data-filter]'), function (el) {
       el.addEventListener('change', function (e) {
         filterState[e.target.getAttribute('data-filter')] = e.target.value;
         renderAll();
@@ -653,9 +675,18 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   }
 
   function applyFilters() {
+    var searchTerm = (filterState.search || '').trim().toLowerCase();
     return records.filter(function (r) {
+      if (searchTerm) {
+        var matched = SEARCH_FIELDS.some(function (key) {
+          var v = r[key];
+          return v !== undefined && v !== null && String(v).toLowerCase().indexOf(searchTerm) !== -1;
+        });
+        if (!matched) return false;
+      }
       for (var i = 0; i < FILTER_DEFS.length; i++) {
         var def = FILTER_DEFS[i];
+        if (def.type === 'text') continue;
         if (def.type === 'daterange') {
           var from = filterState[def.key + 'From'];
           var to = filterState[def.key + 'To'];
@@ -676,12 +707,8 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   function renderKpis(filtered) {
     if (!els.kpiGrid) return;
     var k = computeKpis(filtered);
-    var openWipPct = k.total ? (k.openWip / k.total * 100) : 0;
-    var closedPct = k.total ? (k.closed / k.total * 100) : 0;
     var cards = [
       { label: 'Total Complaints', value: k.total.toLocaleString('en-IN') },
-      { label: 'Open / WIP', value: openWipPct.toFixed(1) + '%' },
-      { label: 'Closed', value: closedPct.toFixed(1) + '%' },
       { label: 'Total Defect Quantity', value: Math.round(k.defectQtyTotal).toLocaleString('en-IN') },
       { label: 'Stores Affected', value: k.storesAffected.toLocaleString('en-IN') }
     ];
@@ -773,16 +800,30 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
   function renderCharts(filtered) {
     var statusEntries = groupSum(filtered, function (r) { return (r.status || 'Unknown').trim() || 'Unknown'; }, function () { return 1; });
+    var statusTotal = statusEntries.reduce(function (sum, e) { return sum + e[1]; }, 0);
     renderChart('chartStatus', {
       type: 'doughnut',
       data: { labels: statusEntries.map(function (e) { return e[0]; }), datasets: [{ data: statusEntries.map(function (e) { return e[1]; }), backgroundColor: CHART_COLORS }] },
       options: {
         plugins: {
           legend: { position: 'bottom' },
+          tooltip: {
+            callbacks: {
+              label: function (ctx) {
+                var v = ctx.parsed;
+                var pct = statusTotal ? (v / statusTotal * 100) : 0;
+                return ctx.label + ': ' + pct.toFixed(1) + '% (' + v.toLocaleString('en-IN') + ')';
+              }
+            }
+          },
           datalabels: {
             color: '#fff',
             font: { weight: '700', size: 12 },
-            formatter: function (value) { return value ? value.toLocaleString('en-IN') : ''; }
+            formatter: function (value) {
+              if (!value) return '';
+              var pct = statusTotal ? (value / statusTotal * 100) : 0;
+              return pct.toFixed(1) + '%';
+            }
           }
         }
       }
@@ -815,20 +856,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     } else {
       destroyChart('chartRom');
     }
-
-    var trendMap = {};
-    filtered.forEach(function (r) {
-      if (!r.date) return;
-      var m = String(r.date).slice(0, 7);
-      if (!/^\d{4}-\d{2}$/.test(m)) return;
-      trendMap[m] = (trendMap[m] || 0) + 1;
-    });
-    var trendKeys = Object.keys(trendMap).sort();
-    renderChart('chartTrend', {
-      type: 'line',
-      data: { labels: trendKeys, datasets: [{ label: 'Complaints', data: trendKeys.map(function (k) { return trendMap[k]; }), borderColor: '#E3001B', backgroundColor: 'rgba(227,0,27,0.15)', fill: true, tension: 0.25 }] },
-      options: { plugins: { legend: { display: false }, datalabels: { display: false } } }
-    });
 
     var vendorEntries = topN(groupSum(filtered, function (r) { return r.vendorName; }, function (r) { return r.defectQty || 0; }), 10);
     renderChart('chartVendorsTop10', horizontalBarConfig(vendorEntries, 'Defect qty', '#222225', { abbreviate: true, maxLen: 16 }));
@@ -875,10 +902,11 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
       }
     });
 
-    /* Month-wise value of defects — sum of MAP value impact per month.
+    /* Month-wise value of defects — sum of MAP value impact per month, in lacs.
        Only meaningful once the Article Section & MAP mapping is loaded. */
     var hasMapImpactData = records.some(function (r) { return r.mapImpact !== null && r.mapImpact !== undefined && !isNaN(r.mapImpact); });
     if (els.chartValueMonthlyEmpty) els.chartValueMonthlyEmpty.classList.toggle('hidden', hasMapImpactData);
+    if (els.chartVendorsMapValueEmpty) els.chartVendorsMapValueEmpty.classList.toggle('hidden', hasMapImpactData);
     if (hasMapImpactData) {
       var monthlyValueMap = {};
       filtered.forEach(function (r) {
@@ -892,7 +920,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
         type: 'bar',
         data: {
           labels: monthlyValueKeys,
-          datasets: [{ label: 'MAP value impact (₹)', data: monthlyValueKeys.map(function (k) { return Math.round(monthlyValueMap[k]); }), backgroundColor: '#C77700' }]
+          datasets: [{ label: 'MAP value impact (₹ L)', data: monthlyValueKeys.map(function (k) { return Math.round((monthlyValueMap[k] / 100000) * 10) / 10; }), backgroundColor: '#C77700' }]
         },
         options: {
           layout: { padding: { top: 24 } },
@@ -901,15 +929,46 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
             datalabels: {
               anchor: 'end', align: 'end', clamp: true, color: '#222225',
               font: { weight: '700', size: 11 },
-              formatter: function (value) { return formatINR(value); }
+              formatter: function (value) { return value.toFixed(1) + ' L'; }
             },
-            tooltip: { callbacks: { label: function (ctx) { return formatINR(ctx.parsed.y); } } }
+            tooltip: { callbacks: { label: function (ctx) { return '₹' + ctx.parsed.y.toFixed(1) + ' L'; } } }
           },
           scales: { y: { beginAtZero: true, grace: '12%' } }
         }
       });
+
+      /* Top 10 vendors by MAP value, in lacs. */
+      var vendorMapEntries = topN(groupSum(filtered, function (r) { return r.vendorName; }, function (r) { return (r.mapImpact || 0); }), 10)
+        .map(function (e) { return [e[0], Math.round((e[1] / 100000) * 10) / 10]; });
+      renderChart('chartVendorsMapValue', {
+        type: 'bar',
+        data: {
+          labels: vendorMapEntries.map(function (e) { return abbreviateLabel(e[0], 16); }),
+          datasets: [{ label: 'MAP value (₹ L)', data: vendorMapEntries.map(function (e) { return e[1]; }), backgroundColor: '#222225' }]
+        },
+        options: {
+          indexAxis: 'y',
+          layout: { padding: { right: 36 } },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                title: function (items) { return vendorMapEntries[items[0].dataIndex][0]; },
+                label: function (ctx) { return '₹' + ctx.parsed.x.toFixed(1) + ' L'; }
+              }
+            },
+            datalabels: {
+              anchor: 'end', align: 'end', clamp: true, color: '#222225',
+              font: { weight: '700', size: 11 },
+              formatter: function (value) { return value.toFixed(1) + ' L'; }
+            }
+          },
+          scales: { x: { beginAtZero: true, grace: '12%' } }
+        }
+      });
     } else {
       destroyChart('chartValueMonthly');
+      destroyChart('chartVendorsMapValue');
     }
   }
 

@@ -109,10 +109,6 @@
         </div>
       </div>
       <div class="card chart-card chart-wide">
-        <h3>Trend over time</h3>
-        <div class="chart-wrap"><canvas id="chartTrend"></canvas></div>
-      </div>
-      <div class="card chart-card chart-wide">
         <h3>Top 10 vendors by defects reported</h3>
         <div class="chart-wrap"><canvas id="chartVendorsTop10"></canvas></div>
       </div>
@@ -132,10 +128,17 @@
         <div class="chart-wrap"><canvas id="chartDefectsMonthly"></canvas></div>
       </div>
       <div class="card chart-card chart-wide">
-        <h3>Month-wise value of defects (&#8377;)</h3>
+        <h3>Month-wise value of defects (&#8377; L)</h3>
         <div class="chart-wrap">
           <canvas id="chartValueMonthly"></canvas>
           <p id="chartValueMonthlyEmpty" class="chart-empty hidden">Upload the Article Section &amp; MAP mapping file in the Admin panel to enable this chart.</p>
+        </div>
+      </div>
+      <div class="card chart-card chart-wide">
+        <h3>Top 10 vendors by MAP value (&#8377; L)</h3>
+        <div class="chart-wrap">
+          <canvas id="chartVendorsMapValue"></canvas>
+          <p id="chartVendorsMapValueEmpty" class="chart-empty hidden">Upload the Article Section &amp; MAP mapping file in the Admin panel to enable this chart.</p>
         </div>
       </div>
     </section>

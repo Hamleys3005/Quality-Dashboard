@@ -499,8 +499,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   var publishedMeta = null;
   var filterState = {};
   var chartInstances = {};
-  var tableSortState = { key: 'date', dir: 'desc' };
-  var tableSearchTerm = '';
 
   var FILTER_DEFS = [
     { key: 'date', label: 'Date range', type: 'daterange' },
@@ -508,7 +506,9 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     { key: 'rom', label: 'ROM', type: 'select' },
     { key: 'status', label: 'Status', type: 'select' },
     { key: 'vendorName', label: 'Vendor', type: 'select' },
-    { key: 'section', label: 'Section', type: 'select' }
+    { key: 'section', label: 'Section', type: 'select' },
+    { key: 'articleCode', label: 'Article Code', type: 'select' },
+    { key: 'itemDescription', label: 'Item Description', type: 'select' }
   ];
 
   var TABLE_COLUMNS = [
@@ -556,9 +556,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     kpiGrid: byId('kpiGrid'),
     chartRomEmpty: byId('chartRomEmpty'),
     chartSectionsEmpty: byId('chartSectionsEmpty'),
-    tableSearch: byId('tableSearch'),
-    rowCount: byId('rowCount'),
-    dataTable: byId('dataTable'),
+    chartValueMonthlyEmpty: byId('chartValueMonthlyEmpty'),
     adminOverlay: byId('adminOverlay'),
     adminCloseBtn: byId('adminCloseBtn'),
     adminLoginView: byId('adminLoginView'),
@@ -678,10 +676,12 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   function renderKpis(filtered) {
     if (!els.kpiGrid) return;
     var k = computeKpis(filtered);
+    var openWipPct = k.total ? (k.openWip / k.total * 100) : 0;
+    var closedPct = k.total ? (k.closed / k.total * 100) : 0;
     var cards = [
       { label: 'Total Complaints', value: k.total.toLocaleString('en-IN') },
-      { label: 'Open / WIP', value: k.openWip.toLocaleString('en-IN') },
-      { label: 'Closed', value: k.closed.toLocaleString('en-IN') },
+      { label: 'Open / WIP', value: openWipPct.toFixed(1) + '%' },
+      { label: 'Closed', value: closedPct.toFixed(1) + '%' },
       { label: 'Total Defect Quantity', value: Math.round(k.defectQtyTotal).toLocaleString('en-IN') },
       { label: 'Stores Affected', value: k.storesAffected.toLocaleString('en-IN') }
     ];
@@ -712,6 +712,19 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     return entries.slice().sort(function (a, b) { return b[1] - a[1]; }).slice(0, n);
   }
 
+  /* Shorten a long vendor/section name for chart axis labels. Keeps the
+     first maxLen characters at a word boundary and appends an ellipsis.
+     The full name is always kept elsewhere (tooltips) so nothing is lost. */
+  function abbreviateLabel(str, maxLen) {
+    str = String(str === null || str === undefined ? '' : str).trim();
+    maxLen = maxLen || 16;
+    if (str.length <= maxLen) return str;
+    var cut = str.slice(0, maxLen);
+    var lastSpace = cut.lastIndexOf(' ');
+    if (lastSpace > maxLen * 0.5) cut = cut.slice(0, lastSpace);
+    return cut.trim() + '\u2026';
+  }
+
   function destroyChart(id) {
     if (chartInstances[id]) { chartInstances[id].destroy(); delete chartInstances[id]; }
   }
@@ -723,15 +736,27 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     chartInstances[id] = new Chart(canvas.getContext('2d'), config);
   }
 
-  function horizontalBarConfig(entries, label, color) {
+  function horizontalBarConfig(entries, label, color, opts) {
+    opts = opts || {};
+    var abbreviate = opts.abbreviate;
+    var fullLabels = entries.map(function (e) { return e[0]; });
+    var displayLabels = abbreviate ? fullLabels.map(function (l) { return abbreviateLabel(l, opts.maxLen); }) : fullLabels;
     return {
       type: 'bar',
-      data: { labels: entries.map(function (e) { return e[0]; }), datasets: [{ label: label, data: entries.map(function (e) { return e[1]; }), backgroundColor: color }] },
+      data: { labels: displayLabels, datasets: [{ label: label, data: entries.map(function (e) { return e[1]; }), backgroundColor: color }] },
       options: {
         indexAxis: 'y',
         layout: { padding: { right: 36 } },
         plugins: {
           legend: { display: false },
+          tooltip: {
+            callbacks: {
+              title: function (items) {
+                var idx = items[0].dataIndex;
+                return fullLabels[idx];
+              }
+            }
+          },
           datalabels: {
             anchor: 'end',
             align: 'end',
@@ -806,7 +831,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     });
 
     var vendorEntries = topN(groupSum(filtered, function (r) { return r.vendorName; }, function (r) { return r.defectQty || 0; }), 10);
-    renderChart('chartVendorsTop10', horizontalBarConfig(vendorEntries, 'Defect qty', '#222225'));
+    renderChart('chartVendorsTop10', horizontalBarConfig(vendorEntries, 'Defect qty', '#222225', { abbreviate: true, maxLen: 16 }));
 
     var articleEntries = topN(groupSum(filtered, function (r) { return r.itemDescription; }, function (r) { return r.defectQty || 0; }), 10);
     renderChart('chartArticlesTop10', horizontalBarConfig(articleEntries, 'Defect qty', '#7A7A80'));
@@ -815,93 +840,76 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     if (els.chartSectionsEmpty) els.chartSectionsEmpty.classList.toggle('hidden', hasSection);
     if (hasSection) {
       var sectionEntries = topN(groupSum(filtered, function (r) { return r.section; }, function (r) { return r.defectQty || 0; }), 10);
-      renderChart('chartSectionsTop10', horizontalBarConfig(sectionEntries, 'Defect qty', '#B50014'));
+      renderChart('chartSectionsTop10', horizontalBarConfig(sectionEntries, 'Defect qty', '#B50014', { abbreviate: true, maxLen: 14 }));
     } else {
       destroyChart('chartSectionsTop10');
     }
-  }
 
-  /* ---------------------------- table ---------------------------- */
-
-  function renderTable(filtered) {
-    if (!els.dataTable) return;
-    var rows = filtered.slice();
-    if (tableSearchTerm) {
-      var term = tableSearchTerm.toLowerCase();
-      rows = rows.filter(function (r) {
-        return TABLE_COLUMNS.some(function (c) {
-          var v = r[c.key];
-          return v !== undefined && v !== null && String(v).toLowerCase().indexOf(term) !== -1;
-        });
-      });
-    }
-    if (tableSortState.key) {
-      var key = tableSortState.key, dir = tableSortState.dir;
-      rows.sort(function (a, b) {
-        var av = a[key], bv = b[key];
-        if (av === null || av === undefined || av === '') return 1;
-        if (bv === null || bv === undefined || bv === '') return -1;
-        if (typeof av === 'number' && typeof bv === 'number') return dir === 'asc' ? av - bv : bv - av;
-        return dir === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
-      });
-    }
-    if (els.rowCount) els.rowCount.textContent = rows.length.toLocaleString('en-IN') + (rows.length === 1 ? ' row' : ' rows');
-
-    var cols = TABLE_COLUMNS.filter(function (c) {
-      if (!c.optional) return true;
-      return records.some(function (r) { return r[c.key] !== undefined && r[c.key] !== null && r[c.key] !== ''; });
+    /* Month-wise quality defects, Hamleys level — total defect quantity per
+       calendar month across the whole filtered set (not split by ROM/store). */
+    var monthlyQtyMap = {};
+    filtered.forEach(function (r) {
+      if (!r.date) return;
+      var m = String(r.date).slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(m)) return;
+      monthlyQtyMap[m] = (monthlyQtyMap[m] || 0) + (r.defectQty || 0);
+    });
+    var monthlyQtyKeys = Object.keys(monthlyQtyMap).sort();
+    renderChart('chartDefectsMonthly', {
+      type: 'bar',
+      data: {
+        labels: monthlyQtyKeys,
+        datasets: [{ label: 'Defect qty', data: monthlyQtyKeys.map(function (k) { return monthlyQtyMap[k]; }), backgroundColor: '#E3001B' }]
+      },
+      options: {
+        layout: { padding: { top: 24 } },
+        plugins: {
+          legend: { display: false },
+          datalabels: {
+            anchor: 'end', align: 'end', clamp: true, color: '#222225',
+            font: { weight: '700', size: 11 },
+            formatter: function (value) { return value.toLocaleString('en-IN'); }
+          }
+        },
+        scales: { y: { beginAtZero: true, grace: '12%' } }
+      }
     });
 
-    var theadRow = '<tr>' + cols.map(function (c) {
-      var arrow = tableSortState.key === c.key ? (' <span class="sort-arrow">' + (tableSortState.dir === 'asc' ? '▲' : '▼') + '</span>') : '';
-      return '<th data-key="' + c.key + '">' + escapeHtml(c.label) + arrow + '</th>';
-    }).join('') + '</tr>';
-
-    var tbodyHtml = rows.map(function (r) {
-      return '<tr>' + cols.map(function (c) {
-        var v = r[c.key];
-        if (c.key === 'status') {
-          return '<td><span class="status-pill ' + statusPillClass(v) + '">' + escapeHtml(v || '-') + '</span></td>';
-        }
-        if (c.key === 'mapValue' || c.key === 'mapImpact') {
-          v = (typeof v === 'number' && !isNaN(v)) ? v.toLocaleString('en-IN', { maximumFractionDigits: 2 }) : '';
-        } else if (c.key === 'defectQty') {
-          v = (typeof v === 'number' && !isNaN(v)) ? v.toLocaleString('en-IN') : v;
-        }
-        return '<td>' + escapeHtml(v === null || v === undefined ? '' : String(v)) + '</td>';
-      }).join('') + '</tr>';
-    }).join('');
-
-    var thead = els.dataTable.querySelector('thead');
-    var tbody = els.dataTable.querySelector('tbody');
-    if (thead) thead.innerHTML = theadRow;
-    if (tbody) tbody.innerHTML = tbodyHtml || ('<tr><td colspan="' + cols.length + '" style="text-align:center;color:var(--grey-500);padding:20px;">No rows match.</td></tr>');
-  }
-
-  function wireTableEvents() {
-    if (els.tableSearch) {
-      els.tableSearch.addEventListener('input', function (e) {
-        tableSearchTerm = e.target.value;
-        renderAll();
+    /* Month-wise value of defects — sum of MAP value impact per month.
+       Only meaningful once the Article Section & MAP mapping is loaded. */
+    var hasMapImpactData = records.some(function (r) { return r.mapImpact !== null && r.mapImpact !== undefined && !isNaN(r.mapImpact); });
+    if (els.chartValueMonthlyEmpty) els.chartValueMonthlyEmpty.classList.toggle('hidden', hasMapImpactData);
+    if (hasMapImpactData) {
+      var monthlyValueMap = {};
+      filtered.forEach(function (r) {
+        if (!r.date || r.mapImpact === null || r.mapImpact === undefined || isNaN(r.mapImpact)) return;
+        var m = String(r.date).slice(0, 7);
+        if (!/^\d{4}-\d{2}$/.test(m)) return;
+        monthlyValueMap[m] = (monthlyValueMap[m] || 0) + r.mapImpact;
       });
-    }
-    if (els.dataTable) {
-      var thead = els.dataTable.querySelector('thead');
-      if (thead) {
-        thead.addEventListener('click', function (e) {
-          var th = e.target.closest ? e.target.closest('th') : null;
-          if (!th) return;
-          var key = th.getAttribute('data-key');
-          if (!key) return;
-          if (tableSortState.key === key) {
-            tableSortState.dir = tableSortState.dir === 'asc' ? 'desc' : 'asc';
-          } else {
-            tableSortState.key = key;
-            tableSortState.dir = 'asc';
-          }
-          renderAll();
-        });
-      }
+      var monthlyValueKeys = Object.keys(monthlyValueMap).sort();
+      renderChart('chartValueMonthly', {
+        type: 'bar',
+        data: {
+          labels: monthlyValueKeys,
+          datasets: [{ label: 'MAP value impact (₹)', data: monthlyValueKeys.map(function (k) { return Math.round(monthlyValueMap[k]); }), backgroundColor: '#C77700' }]
+        },
+        options: {
+          layout: { padding: { top: 24 } },
+          plugins: {
+            legend: { display: false },
+            datalabels: {
+              anchor: 'end', align: 'end', clamp: true, color: '#222225',
+              font: { weight: '700', size: 11 },
+              formatter: function (value) { return formatINR(value); }
+            },
+            tooltip: { callbacks: { label: function (ctx) { return formatINR(ctx.parsed.y); } } }
+          },
+          scales: { y: { beginAtZero: true, grace: '12%' } }
+        }
+      });
+    } else {
+      destroyChart('chartValueMonthly');
     }
   }
 
@@ -911,7 +919,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     var filtered = applyFilters();
     renderKpis(filtered);
     renderCharts(filtered);
-    renderTable(filtered);
   }
 
   /* ---------------------------- admin: column mapping + session info ---------------------------- */
@@ -1299,7 +1306,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
   wireAdminEvents();
   wireUploadEvents();
-  wireTableEvents();
   renderSessionInfo();
   initLiveData();
 }

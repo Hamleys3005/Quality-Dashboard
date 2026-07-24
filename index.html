@@ -127,22 +127,16 @@
           <p id="chartSectionsEmpty" class="chart-empty hidden">Upload the Article Section &amp; MAP mapping file in the Admin panel to enable this chart.</p>
         </div>
       </div>
-    </section>
-
-    <!-- Data table -->
-    <section class="card" id="tableSection">
-      <h3>Complaint records</h3>
-      <div class="table-toolbar">
-        <input type="text" id="tableSearch" placeholder="Search records&hellip;" />
-        <div class="table-toolbar-actions">
-          <span id="rowCount" class="row-count"></span>
-        </div>
+      <div class="card chart-card chart-wide">
+        <h3>Month-wise quality defects &mdash; Hamleys level</h3>
+        <div class="chart-wrap"><canvas id="chartDefectsMonthly"></canvas></div>
       </div>
-      <div class="table-scroll">
-        <table id="dataTable">
-          <thead></thead>
-          <tbody></tbody>
-        </table>
+      <div class="card chart-card chart-wide">
+        <h3>Month-wise value of defects (&#8377;)</h3>
+        <div class="chart-wrap">
+          <canvas id="chartValueMonthly"></canvas>
+          <p id="chartValueMonthlyEmpty" class="chart-empty hidden">Upload the Article Section &amp; MAP mapping file in the Admin panel to enable this chart.</p>
+        </div>
       </div>
     </section>
 
